@@ -23,3 +23,6 @@ venv/
 
 # personal league config (IDs + strategy) — keep private
 leagues/leagues.yaml
+
+# cached API pulls
+data/
