@@ -35,3 +35,6 @@ data/raw/sleeper_players.json
 
 # generated reports
 reports/
+
+# dropped screenshots (may contain league/personal info)
+screenshots/

@@ -144,7 +144,34 @@ def load_espn(cfg: dict) -> League:
     )
 
 
-LOADERS = {"sleeper": load_sleeper, "espn": load_espn}
+def load_manual(cfg: dict) -> League:
+    """A league whose settings are typed into leagues.yaml by hand.
+
+    Needed where the platform's API is unavailable -- currently Yahoo, whose
+    Fantasy API is behind a manual approval queue. Everything the engine needs
+    is here; only live pick tracking is lost.
+    """
+    m = cfg.get("manual") or {}
+    if not m.get("scoring") or not m.get("starters"):
+        raise RuntimeError("manual league needs `manual.scoring` and `manual.starters`")
+    style = m.get("waiver_style", "priority")
+    note = {"priority": "rolling — a successful claim drops you to last",
+            "priority_reset": "resets weekly by record",
+            "faab": "FAB budget"}.get(style, style)
+    return League(
+        name=cfg["name"], platform=cfg["platform"], league_id=str(cfg["league_id"]),
+        teams=int(m["teams"]), waiver_style=style,
+        waiver_note=m.get("waiver_note", note),
+        scoring={k: float(v) for k, v in m["scoring"].items()},
+        starters={k: int(v) for k, v in m["starters"].items()},
+        bench=int(m.get("bench", 0)),
+        draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),
+        raw={"manual": True, **m},
+    )
+
+
+LOADERS = {"sleeper": load_sleeper, "espn": load_espn,
+           "yahoo": load_manual, "manual": load_manual}
 
 
 def load_all(path: pathlib.Path | None = None):
