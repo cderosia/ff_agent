@@ -35,6 +35,8 @@ class League:
     scoring: dict                      # canonical stat -> points
     starters: dict                     # slot name -> count
     bench: int = 0
+    waiver_style: str = "priority"   # "priority" | "priority_reset" | "faab"
+    waiver_note: str = ""
     draft_datetime: str = ""
     notes: str = ""
     raw: dict = field(default_factory=dict, repr=False)
@@ -86,9 +88,18 @@ def load_sleeper(cfg: dict) -> League:
                 "DEF": "DST", "WRRB_FLEX": "RB/WR"}.get(slot, slot)
         starters[name] = starters.get(name, 0) + 1
 
+    s = d.get("settings") or {}
+    # 0 = rolling priority, 1 = reverse-standings reset, 2 = FAAB.
+    # NOTE: waiver_budget is populated (100) even when FAAB is off -- it's a
+    # default, not evidence. Only waiver_type decides.
+    style = {0: "priority", 1: "priority_reset", 2: "faab"}.get(s.get("waiver_type"), "priority")
+    note = {"priority": "rolling — a successful claim drops you to last",
+            "priority_reset": "resets weekly by record",
+            "faab": "FAAB budget"}[style]
+
     return League(
         name=cfg["name"], platform="sleeper", league_id=str(lid),
-        teams=d.get("total_rosters", 0),
+        teams=d.get("total_rosters", 0), waiver_style=style, waiver_note=note,
         scoring=sleeper_scoring_to_canonical(d.get("scoring_settings")),
         starters=starters, bench=bench,
         draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),
@@ -115,9 +126,17 @@ def load_espn(cfg: dict) -> League:
         else:
             starters[name] = starters.get(name, 0) + count
 
+    acq = s.get("acquisitionSettings") or {}
+    if acq.get("acquisitionType") == "WAIVERS_FAAB":
+        style, note = "faab", "FAAB budget"
+    elif acq.get("waiverOrderReset"):
+        style, note = "priority_reset", "resets weekly by record"
+    else:
+        style, note = "priority", "rolling — a successful claim drops you to last"
+
     return League(
         name=cfg["name"], platform="espn", league_id=str(lid),
-        teams=s.get("size", 0),
+        teams=s.get("size", 0), waiver_style=style, waiver_note=note,
         scoring=espn_scoring_to_canonical(s["scoringSettings"].get("scoringItems")),
         starters=starters, bench=bench,
         draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),

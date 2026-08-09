@@ -93,6 +93,9 @@ def build(L, cfg, season, week, live):
             "tgt": r.targets_recent, "dtgt": r.tgt_delta,
             "car": r.carries_recent, "dcar": r.carry_delta,
         })
+    heat = weekly.heat_rank(blob) if live else {}
+    for c in cands:
+        c["heat"] = heat.get(key(c["name"], c["position"]))
     cands.sort(key=lambda c: (-c["gain"], -c["ppg"]))
 
     # pure usage movers, need-agnostic: intelligence, not a recommendation
@@ -117,7 +120,7 @@ def render_tuesday(L, d, season, week, live):
     tag = "" if live else f" · **REPLAY of {season} week {week}** (data through week {week-1} only)"
     out.append(f"*generated {datetime.now():%a %d %b %H:%M}{tag}*")
     out.append("")
-    out.append(f"**FAAB left** ${d['budget_left']} of ${d['total']} · "
+    out.append(f"**Waivers**: {L.waiver_note} · "
                f"**roster gaps**: " +
                (", ".join(f"{s}×{c}" for s, c in d["gaps"].items()) or "starters full"))
     out.append("")
@@ -132,23 +135,24 @@ def render_tuesday(L, d, season, week, live):
         out.append("_Nothing on the wire improves your starting lineup. "
                    "Save the FAAB._")
     else:
-        out.append("| | player | pos | adds | ppg | snap% | Δsnap | tgt | Δtgt | bid |")
-        out.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|")
+        out.append("| | player | pos | adds | ppg | snap% | Δsnap | tgt | Δtgt | call |")
+        out.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---|")
         for i, c in enumerate(useful[:6]):
-            bid = weekly.faab_bid(i, d["budget_left"], weeks_left, 0.0)
+            call, why = weekly.claim_call(c["gain"], c.get("heat"), L.waiver_style, live)
             gain = f"**+{c['gain']:.0f}**"
             out.append(f"| {i+1} | {c['name']} | {c['pos']} | {gain} | {c['ppg']:.1f} | "
                        f"{c['snap']*100:.0f}% | {c['dsnap']*100:+.0f} | {c['tgt']:.1f} | "
-                       f"{c['dtgt']:+.1f} | ${bid} |")
+                       f"{c['dtgt']:+.1f} | **{call}** — {why} |")
         out.append("")
         top = useful[0]
+        call, why = weekly.claim_call(top["gain"], top.get("heat"), L.waiver_style, live)
         out.append(f"**Priority: {top['name']}.** Adds {top['gain']:.0f} points to your "
-                   f"projected starting lineup.")
+                   f"projected starting lineup — {call}, {why}.")
         bench = [c for c in d["cands"] if c["gain"] <= 0][:3]
         if bench:
             out.append("")
             out.append("Producing but *don't* improve your lineup — you're already "
-                       "covered at their position, so no bid: "
+                       "covered at their position, so don't spend a claim: "
                        + ", ".join(f"{c['name']} ({c['pos']}, {c['ppg']:.1f} ppg)"
                                    for c in bench) + ".")
     out.append("")

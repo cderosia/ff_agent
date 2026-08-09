@@ -118,16 +118,43 @@ def trending_adds(hours: int = 24, limit: int = 50) -> dict:
     return {x["player_id"]: x["count"] for x in r.json()} if r.ok else {}
 
 
-def faab_bid(rank: int, budget_left: int, weeks_left: int, heat: float) -> int:
-    """A suggested opening bid, as a percent of remaining budget.
+def claim_call(gain: float, heat: int, waiver_style: str,
+               heat_known: bool = True) -> tuple[str, str]:
+    """Claim now, or let him clear and add for free?
 
-    Deliberately simple and legible: top targets get real money, depth gets
-    scraps, and heavy market interest pushes the bid up. Better to be
-    explainable than falsely precise.
+    None of these leagues use FAAB, so the scarce resource is waiver position,
+    not money. A claim is only worth making if someone else would take him
+    first -- otherwise he clears and costs nothing on Thursday.
+
+    `heat` is his rank among Sleeper's league-wide trending adds (0 = hottest,
+    None-ish = not trending). It stands in for "will he be gone", which is the
+    only thing that makes a claim necessary.
     """
-    base = {0: 0.28, 1: 0.18, 2: 0.12, 3: 0.08}.get(rank, 0.04)
-    base *= 1.0 + min(heat, 1.0) * 0.5
-    # late in the season, hoard less
-    if weeks_left <= 5:
-        base *= 1.35
-    return max(1, int(round(budget_left * base)))
+    costly = waiver_style == "priority"      # rolling: a claim sends you last
+    contested = heat is not None and heat < 40
+
+    if gain <= 0:
+        return "skip", "doesn't improve your lineup"
+    if not heat_known:
+        # Sleeper's trending feed is live-only, so a replay can't know whether
+        # anyone else wanted him. Don't dress that up as "he'll clear".
+        return "?", "can't tell if contested — no trending data for a past week"
+    if not contested:
+        return "wait", "not being added elsewhere — he should clear, add him free"
+    if costly and gain < 12:
+        return "wait", "contested, but not worth dropping to last priority"
+    if costly:
+        return "claim", "worth burning your priority — he won't last"
+    return "claim", "contested; your priority resets anyway, so use it"
+
+
+def heat_rank(blob: dict, hours: int = 48, limit: int = 200) -> dict:
+    """{(name,pos): rank} among Sleeper's trending adds. Live only."""
+    tr = trending_adds(hours, limit)
+    out = {}
+    for i, pid in enumerate(tr):
+        p = blob.get(pid) or {}
+        n = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+        if n and p.get("position"):
+            out[key(n, p["position"])] = i
+    return out
