@@ -309,7 +309,7 @@ text-decoration:underline}
 .f{padding:4px 12px;border-radius:14px;background:#1b2130;border:1px solid var(--line);
 cursor:pointer;font-size:12px;color:var(--dim)}
 .f.on{background:var(--acc);color:#0b1020;border-color:var(--acc);font-weight:700}
-.scrollbox{max-height:340px;overflow-y:auto;overscroll-behavior:contain}
+.scrollbox{height:252px;overflow-y:auto;overscroll-behavior:contain}
 .scrollbox::-webkit-scrollbar{width:9px}
 .scrollbox::-webkit-scrollbar-thumb{background:#2f3846;border-radius:5px}
 .tierrow td{border-top:1px dashed #39445699}
@@ -356,14 +356,40 @@ function render(d){
  const g=Object.entries(d.gaps);
  h+= g.length?g.map(([s,n])=>`<span class=need>${esc(s)} ×${n}</span>`).join('')
     :`<span class=need style="background:#12240f;color:var(--go)">starters full</span>`;
- h+=`</div></div><div class=card><div class=lbl>take now — value to your lineup</div><table>`;
- for(const r of d.recs){
-  h+=`<tr><td style="width:52%"><span class=bar style="width:${Math.round(r.g/mx*70)}px"></span>`
-   +`${esc(r.n)} ${pos(r.p)}${r.s>0.2?' <span title="sources disagree" style="color:var(--warn)">◆</span>':''}</td>`
+ h+=`</div></div>`;
+
+ if(d.wait&&Object.keys(d.wait).length){
+  h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
+  for(const p in d.wait){const w=d.wait[p];
+   const c=(w.cost==null)?'—':(w.cost>12?`<span class=cost>-${w.cost}</span>`
+        :`<span class=cheap>-${w.cost}</span>`);
+   h+=`<tr><td>${pos(p)}</td><td>${esc(w.now)} <span class=pos>(${w.now_v})</span></td>`
+    +`<td class=pos>&rarr; ${w.later?esc(w.later)+' ('+w.later_v+')':'nobody survives'}</td>`
+    +`<td class=num>${c}</td></tr>`;}
+  h+=`</table></div>`;}
+
+ h+=`<div class=card><div class=lbl>take now — value to your lineup</div><div class=filters>`;
+ for(const f of ['ALL','QB','RB','WR','TE'])
+  h+=`<div class="f ${FILTER===f?'on':''}" onclick="setf('${f}')">${f}</div>`;
+ h+=`</div><div class=scrollbox><table>`;
+ const shown=d.recs.filter(r=>FILTER==='ALL'||r.p.replace(/[0-9]/g,'')===FILTER);
+ let prevTier=null;
+ for(const r of shown){
+  const bare=r.p.replace(/[0-9]/g,'');
+  const tl=(d.tiers||{})[bare]||[];
+  const te=tl.find(x=>x.n===r.n);
+  const brk=(FILTER!=='ALL'&&te&&prevTier!==null&&te.tier!==prevTier);
+  if(te) prevTier=te.tier;
+  h+=`<tr class="${brk?'tierrow':''}"><td style="width:50%">`
+   +`<span class=bar style="width:${Math.round(Math.max(r.g,0)/mx*70)}px"></span>`
+   +`${esc(r.n)} ${pos(r.p)}${r.s>0.2?' <span title="sources disagree" style="color:var(--warn)">◆</span>':''}`
+   +`${brk?' <span class=tiertag>TIER '+te.tier+'</span>':''}</td>`
    +`<td class=num style="color:var(--acc)">+${Math.round(r.g)}</td>`
    +`<td class="num pos">vorp ${Math.round(r.v)}</td>`
    +`<td class=num>mkt ${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
- h+=`</table></div><div class=card><div class=lbl>value — falling past their price</div><table>`;
+ if(!shown.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;
+ h+=`</table></div></div>`;
+ h+=`<div class=card><div class=lbl>value — falling past their price</div><table>`;
  for(const r of d.value)
   h+=`<tr><td>${esc(r.n)} ${pos(r.p)}</td><td class=num>mkt ${r.m}</td><td class=num>${sg(r.e)}</td></tr>`;
  h+=`</table></div><div class=card><div class=lbl>gone before your next pick</div><div class=gone>`;
