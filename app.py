@@ -137,15 +137,21 @@ for nm, err in errors:
 st.sidebar.divider()
 st.sidebar.caption(
     "Preseason: rosters and drafts are empty until they happen. "
-    "Waivers and Trades offer a replay of last season so you can see real output."
+    "Waivers, Lineup and Trades offer a replay of last season so you can see "
+    "real output."
+)
+st.sidebar.info(
+    "**Draft day** runs separately:\n\n`python3 scripts/draft_server.py`\n\n"
+    "It's a glanceable second screen that refreshes itself, with its own "
+    "league switcher."
 )
 
 
 # ---------------------------------------------------------------------------
 # tabs
 # ---------------------------------------------------------------------------
-t_board, t_draft, t_lineup, t_waiver, t_trade, t_keep, t_report = st.tabs(
-    ["Board", "Live draft", "Lineup", "Waivers", "Trades", "Keepers", "Report"])
+t_board, t_lineup, t_waiver, t_trade, t_keep, t_report = st.tabs(
+    ["Board", "Lineup", "Waivers", "Trades", "Keepers", "Report"])
 
 
 # ---- Board ----------------------------------------------------------------
@@ -184,57 +190,6 @@ with t_board:
         "Src": r.get("n_sources", 1),
         "Disagree": f"{r.get('rel_spread',0)*100:.0f}%" if r.get("rel_spread") else "",
     } for r in show[:250]]), hide_index=True, width='stretch', height=520)
-
-
-# ---- Live draft -----------------------------------------------------------
-with t_draft:
-    st.header("Live draft")
-    auto = st.toggle("Auto-refresh every 10s", value=False)
-
-    @st.fragment(run_every=10 if auto else None)
-    def draft_panel():
-        blob = get_blob()
-        id_to_player = {p["espn_id"]: p for p in get_projections() if p.get("espn_id")}
-        try:
-            if L.platform == "sleeper":
-                picks = draft_mod.sleeper_picks(L.raw["draft_id"])
-                me = cfg.get("owner_id")
-            else:
-                from draft import my_espn_team
-                ck = {"espn_s2": _env("ESPN_S2"), "SWID": _env("ESPN_SWID")}
-                picks = draft_mod.espn_picks(L.league_id, ck, id_to_player)
-                me = my_espn_team(L.league_id, ck)
-        except Exception as e:
-            st.error(f"couldn't read the draft: {e}")
-            return
-
-        taken = {key(p["name"], p["position"]) for p in picks if p["name"]}
-        by_key = {key(r["name"], r["position"]): r for r in rows}
-        mine = [by_key[key(p["name"], p["position"])] for p in picks
-                if p.get("by") == me and key(p["name"], p["position"]) in by_key]
-
-        a, b = st.columns([1, 1])
-        a.metric("On the clock", f"pick {len(picks)+1}")
-        gaps = draft_mod.roster_gaps(mine, L)
-        b.metric("Still need",
-                 " ".join(f"{s}×{n}" for s, n in gaps.items() if s not in ("K", "DST"))
-                 or "starters full")
-
-        if not picks:
-            st.info("Draft hasn't started. This fills in live once picks land.")
-        if mine:
-            st.caption("**Your roster:** " +
-                       ", ".join(f"{p['name']} ({p['pos_rank']})" for p in mine))
-
-        recs = draft_mod.recommend(rows, L, taken, mine, limit=15)
-        st.subheader("Best for your roster")
-        st.dataframe(pd.DataFrame([{
-            "Player": r["name"], "Pos": r["pos_rank"],
-            "Adds": round(r["marginal"]), "VORP": round(r["vorp"]),
-            "Market": r.get("adp_rank"), "Edge": r.get("edge"),
-        } for r in recs]), hide_index=True, width='stretch')
-
-    draft_panel()
 
 
 # ---- Lineup ---------------------------------------------------------------
