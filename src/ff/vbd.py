@@ -85,6 +85,7 @@ def build(projections: list[dict], league) -> list[dict]:
             "name": p["name"],
             "position": p["position"],
             "espn_id": p.get("espn_id"),
+            "team": p.get("team"),
             "points": round(score(p["stats"], league.scoring), 2),
             "n_sources": p.get("n_sources", 1),
             "spread": round(spread, 1),

@@ -31,6 +31,15 @@ UA = {"User-Agent": "Mozilla/5.0"}
 
 POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
 
+# ESPN proTeamId -> abbreviation, so bye weeks can be resolved from the schedule
+ESPN_TEAM = {
+    1: "ATL", 2: "BUF", 3: "CHI", 4: "CIN", 5: "CLE", 6: "DAL", 7: "DEN", 8: "DET",
+    9: "GB", 10: "TEN", 11: "IND", 12: "KC", 13: "LV", 14: "LA", 15: "MIA",
+    16: "MIN", 17: "NE", 18: "NO", 19: "NYG", 20: "NYJ", 21: "PHI", 22: "ARI",
+    23: "PIT", 24: "LAC", 25: "SF", 26: "SEA", 27: "TB", 28: "WAS", 29: "CAR",
+    30: "JAX", 33: "BAL", 34: "HOU",
+}
+
 
 def fetch_espn(limit: int = 600, max_age_hours: int = 12, force: bool = False) -> list[dict]:
     """Player projections, cached to disk so drafting doesn't hammer ESPN."""
@@ -81,6 +90,7 @@ def fetch_espn(limit: int = 600, max_age_hours: int = 12, force: bool = False) -
             "name": p.get("fullName"),
             "position": pos,
             "pro_team_id": p.get("proTeamId"),
+            "team": ESPN_TEAM.get(p.get("proTeamId")),
             "espn_points": round(season.get("appliedTotal") or 0.0, 2),
             # ESPN's own market price — the real ADP in ESPN leagues
             "adp": own.get("averageDraftPosition") or 0.0,
@@ -166,11 +176,14 @@ def fetch(force: bool = False, sources: tuple = ("espn", "sleeper")) -> list[dic
             merged[k]["lines"]["sleeper"] = p["stats"]
             merged[k]["sleeper_adp"] = p["adp"]
             merged[k]["games"] = p.get("games")
+            if p.get("team"):
+                merged[k]["team"] = p["team"]
         else:
             merged[k] = {
                 "espn_id": None, "name": p["name"], "position": p["position"],
                 "pro_team_id": None, "espn_points": 0.0, "adp": 0.0,
                 "auction_value": 0.0, "pct_owned": 0.0, "games": p.get("games"),
+                "team": p.get("team"),
                 "lines": {"sleeper": p["stats"]}, "sleeper_adp": p["adp"],
             }
 
