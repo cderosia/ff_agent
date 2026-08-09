@@ -36,6 +36,7 @@ from ff.names import key                 # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
 LOCK = threading.Lock()
+PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
 PICK_CACHE: dict = {}   # league name -> (timestamp, picks)
 POLL_SECONDS = 4.0
@@ -72,12 +73,16 @@ def prepare(leagues, cfgs, proj):
                 me = my_espn_team(L.league_id, ck)
             except Exception:
                 me = None
-        else:
+        elif L.platform == "sleeper":
             me = cfg.get("owner_id")
+        else:
+            me = "me"          # manual entry tags your own picks directly
 
-        slot = None
+        slot = (cfg.get("manual") or {}).get("draft_slot")
         try:
-            if L.platform == "sleeper":
+            if L.platform not in ("sleeper", "espn"):
+                pass
+            elif L.platform == "sleeper":
                 d = requests.get(
                     f"https://api.sleeper.app/v1/draft/{L.raw['draft_id']}",
                     timeout=15).json()
@@ -97,8 +102,43 @@ def prepare(leagues, cfgs, proj):
               f"· {meta['source']}")
 
 
+def manual_path(name):
+    return PICKS_DIR / f"{name}.json"
+
+
+def manual_picks(name):
+    """Picks entered by hand, for leagues with no readable draft feed."""
+    p = manual_path(name)
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+def add_manual_pick(name, player, mine):
+    PICKS_DIR.mkdir(parents=True, exist_ok=True)
+    picks = manual_picks(name)
+    picks.append({"pick_no": len(picks) + 1,
+                  "round": len(picks) // CTX[name]["league"].teams + 1,
+                  "name": player["name"], "position": player["position"],
+                  "by": "me" if mine else "other", "slot": None})
+    manual_path(name).write_text(json.dumps(picks))
+    PICK_CACHE.pop(name, None)
+    return picks
+
+
+def undo_manual_pick(name):
+    picks = manual_picks(name)[:-1]
+    manual_path(name).write_text(json.dumps(picks))
+    PICK_CACHE.pop(name, None)
+    return picks
+
+
+def is_manual(name):
+    return CTX[name]["league"].platform not in ("sleeper", "espn")
+
+
 def picks_for(name):
-    """Poll this league's picks, cached briefly so switching is cheap."""
+    """This league's picks, cached briefly so switching is cheap."""
+    if is_manual(name):
+        return manual_picks(name)          # local file; no polling
     now = time.time()
     ts, cached = PICK_CACHE.get(name, (0, None))
     if cached is not None and now - ts < POLL_SECONDS:
@@ -141,6 +181,8 @@ def state_for(name):
 
     return {
         "league": name, "leagues": list(CTX), "teams": L.teams,
+        "manual": is_manual(name),
+        "pool": [{"n": r["name"], "p": r["pos_rank"]} for r in avail[:320]],
         "on_clock": on_clock, "until": until, "slot": slot, "npicks": len(picks),
         "gaps": {s: n for s, n in draft_mod.roster_gaps(mine, L).items()
                  if s not in ("K", "DST")},
@@ -187,6 +229,18 @@ vertical-align:middle;margin-right:7px}
 padding:2px 8px;margin-right:6px;font-size:13px}
 .gone span,.roster span{display:inline-block;margin:0 10px 5px 0;color:var(--dim)}
 .err{background:#2a1416;border-color:#4b1d22;color:#fca5a5}
+.entry{background:#141a26;border-color:#2b3a52}
+input#q{width:100%;padding:10px 12px;border-radius:7px;border:1px solid var(--line);
+background:#0c0f14;color:var(--fg);font:15px ui-monospace,Menlo,monospace}
+.hits{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.hit{padding:6px 11px;border-radius:6px;background:#1d2532;border:1px solid var(--line);
+cursor:pointer;font-size:13px}
+.hit:hover{background:#26304180}
+.hit b{color:var(--go)}
+.mineflag{margin-top:9px;color:var(--dim);font-size:13px;cursor:pointer;user-select:none}
+.mineflag input{margin-right:7px;transform:scale(1.2)}
+.undo{float:right;color:var(--dim);cursor:pointer;font-size:12px;
+text-decoration:underline}
 @media(max-width:640px){body{padding:8px}td{padding:3px 4px}}
 </style></head><body>
 <div id=tabs class=tabs></div><div id=app>loading…</div>
@@ -202,11 +256,21 @@ function tabs(d){
 function pick(n){LEAGUE=n;history.replaceState({},'',`?league=${encodeURIComponent(n)}`);tick();}
 function render(d){
  const mx=Math.max(1,...d.recs.map(r=>r.g));
+ let entry='';
+ if(d.manual){
+  entry=`<div class="card entry"><div class=lbl>manual entry — no live feed for this league`
+   +`<span class=undo onclick="undoPick()">undo last</span></div>`
+   +`<input id=q placeholder="type a name, then click to mark drafted…" `
+   +`autocomplete=off oninput="hits()" onkeydown="if(event.key==='Enter')first()">`
+   +`<div class=hits id=hits></div>`
+   +`<label class=mineflag><input type=checkbox id=mine> this pick is MINE</label></div>`;
+ }
  let h=`<h1>${esc(d.league)} · pick ${d.on_clock}</h1><div class=sub>`;
  h+= d.until===0?`<span class=live>● YOU ARE ON THE CLOCK</span>`
    : d.until==null?`draft not started / slot unknown`
    : `you're up in <span class=clock>${d.until}</span> pick${d.until==1?'':'s'}`;
  h+=` · slot ${d.slot??'?'} · ${d.npicks} picks in · ${esc(d.ts)}</div>`;
+ h+=entry;
  h+=`<div class=card><div class=lbl>your roster (${d.roster.length})</div><div class=roster>`;
  h+= d.roster.length?d.roster.map(r=>`<span>${esc(r.n)} ${pos(r.p)}</span>`).join(''):'<span>—</span>';
  h+=`</div><div style="margin-top:9px">`;
@@ -229,12 +293,43 @@ function render(d){
  h+= d.last.map(r=>`<span>${r.no}. ${esc(r.n)} ${pos(r.p)}</span>`).join('')||'<span>—</span>';
  return h+`</div></div>`;
 }
+let POOL=[];
+function hits(){
+ const q=(document.getElementById('q').value||'').toLowerCase().trim();
+ const box=document.getElementById('hits');
+ if(q.length<2){box.innerHTML='';return;}
+ const m=POOL.filter(p=>p.n.toLowerCase().includes(q)).slice(0,8);
+ box.innerHTML=m.map(p=>`<div class=hit onclick="take('${p.n.replace(/'/g,"\\'")}')">`
+   +`${esc(p.n)} ${pos(p.p)}</div>`).join('')||'<span style="color:var(--dim)">no match</span>';
+}
+function first(){
+ const h=document.querySelector('.hit'); if(h) h.click();
+}
+async function take(n){
+ const mine=document.getElementById('mine').checked?1:0;
+ document.getElementById('q').value='';document.getElementById('hits').innerHTML='';
+ const d=await (await fetch(`/pick?league=${encodeURIComponent(LEAGUE)}`
+   +`&name=${encodeURIComponent(n)}&mine=${mine}`)).json();
+ if(!d.error){POOL=d.pool||[];tabs(d);document.getElementById('app').innerHTML=render(d);}
+ const q=document.getElementById('q'); if(q) q.focus();
+}
+async function undoPick(){
+ const d=await (await fetch(`/undo?league=${encodeURIComponent(LEAGUE)}`)).json();
+ if(!d.error){POOL=d.pool||[];tabs(d);document.getElementById('app').innerHTML=render(d);}
+}
 async function tick(){
  try{
   const d=await (await fetch('/state?league='+encodeURIComponent(LEAGUE))).json();
   if(d.error){document.getElementById('app').innerHTML=
      `<div class="card err">${esc(d.error)}</div>`;}
-  else{LEAGUE=d.league;tabs(d);document.getElementById('app').innerHTML=render(d);}
+  else{
+    LEAGUE=d.league;POOL=d.pool||[];tabs(d);
+    const q=document.getElementById('q');
+    const keep=q?{v:q.value,f:document.activeElement===q}:null;
+    document.getElementById('app').innerHTML=render(d);
+    if(keep){const q2=document.getElementById('q');
+             if(q2){q2.value=keep.v;if(keep.f){q2.focus();hits();}}}
+  }
  }catch(e){}
  clearTimeout(window._t);window._t=setTimeout(tick,5000);
 }
@@ -247,6 +342,30 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/pick") or self.path.startswith("/undo"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (q.get("league") or [""])[0]
+            try:
+                with LOCK:
+                    if self.path.startswith("/undo"):
+                        undo_manual_pick(name)
+                    else:
+                        who = (q.get("name") or [""])[0]
+                        mine = (q.get("mine") or ["0"])[0] == "1"
+                        row = next((r for r in CTX[name]["rows"]
+                                    if r["name"] == who), None)
+                        if row:
+                            add_manual_pick(name, row, mine)
+                    body = json.dumps(state_for(name)).encode()
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}",
+                                   "leagues": list(CTX), "league": name}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/state"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = (q.get("league") or [""])[0] or next(iter(CTX))

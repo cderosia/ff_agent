@@ -38,3 +38,6 @@ reports/
 
 # dropped screenshots (may contain league/personal info)
 screenshots/
+
+# in-progress draft state
+data/manual_picks/
