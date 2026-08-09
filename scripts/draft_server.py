@@ -154,6 +154,65 @@ def picks_for(name):
     return picks
 
 
+def tier_breaks(rows, position, n=14):
+    """Mark where the cliff is within a position.
+
+    A tier break is a drop to the next player that's much larger than the
+    typical gap. Knowing three players remain before a cliff is what actually
+    decides whether you take a position now or wait a round.
+    """
+    at = [r for r in rows if r["position"] == position][:n]
+    if len(at) < 3:
+        return []
+    gaps = [at[i]["points"] - at[i + 1]["points"] for i in range(len(at) - 1)]
+    typical = sorted(gaps)[len(gaps) // 2] or 1.0
+    # The floor has to scale with the position, not be a fixed number of points.
+    # At the top of a board the gaps are naturally big, so a flat threshold makes
+    # every elite player his own tier -- which tells you nothing.
+    span = max(1.0, at[0]["vorp"] - at[-1]["vorp"])
+    threshold = max(typical * 2.2, span * 0.14)
+    out, tier = [], 1
+    for i, r in enumerate(at):
+        out.append({"n": r["name"], "p": r["pos_rank"], "v": round(r["vorp"]),
+                    "tier": tier})
+        if i < len(gaps) and gaps[i] > threshold:
+            tier += 1
+    return out
+
+
+def wait_cost(rows, taken_keys, next_pick, following_pick):
+    """Per position: best now vs. best likely to survive to your next pick."""
+    out = {}
+    for pos in ("QB", "RB", "WR", "TE"):
+        at = [r for r in rows if r["position"] == pos
+              and key(r["name"], r["position"]) not in taken_keys]
+        if not at:
+            continue
+        best = max(at, key=lambda r: r["vorp"])
+        survivors = [r for r in at
+                     if r.get("adp_rank") and r["adp_rank"] >= following_pick]
+        later = max(survivors, key=lambda r: r["vorp"]) if survivors else None
+        out[pos] = {
+            "now": best["name"], "now_v": round(best["vorp"]),
+            "later": later["name"] if later else None,
+            "later_v": round(later["vorp"]) if later else None,
+            "cost": round(best["vorp"] - later["vorp"]) if later else None,
+        }
+    return out
+
+
+def positional_run(picks, window=8):
+    """Is a run happening right now?"""
+    recent = [p.get("position") for p in picks[-window:] if p.get("position")]
+    if len(recent) < 4:
+        return None
+    counts = {}
+    for x in recent:
+        counts[x] = counts.get(x, 0) + 1
+    pos, n = max(counts.items(), key=lambda kv: kv[1])
+    return {"pos": pos, "n": n, "of": len(recent)} if n >= len(recent) * 0.5 else None
+
+
 def state_for(name):
     c = CTX[name]
     L, rows = c["league"], c["rows"]
@@ -170,7 +229,7 @@ def state_for(name):
     until = (upcoming[0] - on_clock) if upcoming else None
     gap = (upcoming[1] - upcoming[0]) if len(upcoming) > 1 else L.teams
 
-    recs = draft_mod.recommend(rows, L, taken, mine, limit=12)
+    recs = draft_mod.recommend(rows, L, taken, mine, limit=60)
     avail = [r for r in rows if key(r["name"], r["position"]) not in taken]
     value = sorted((r for r in avail
                     if r.get("edge") is not None and r["vbd_rank"] <= 170),
@@ -195,6 +254,11 @@ def state_for(name):
         "gone": [{"n": r["name"], "p": r["pos_rank"]} for r in gone],
         "last": [{"n": p["name"], "p": p.get("position"), "no": p["pick_no"]}
                  for p in picks[-6:]][::-1],
+        "tiers": {pos: tier_breaks([r for r in avail], pos)
+                  for pos in ("QB", "RB", "WR", "TE")},
+        "wait": wait_cost(rows, taken, on_clock + (until or 0),
+                          on_clock + (until or 0) + gap),
+        "run": positional_run(picks),
         "ts": time.strftime("%H:%M:%S"),
     }
 
@@ -241,6 +305,19 @@ cursor:pointer;font-size:13px}
 .mineflag input{margin-right:7px;transform:scale(1.2)}
 .undo{float:right;color:var(--dim);cursor:pointer;font-size:12px;
 text-decoration:underline}
+.filters{display:flex;gap:5px;margin-bottom:9px;flex-wrap:wrap}
+.f{padding:4px 12px;border-radius:14px;background:#1b2130;border:1px solid var(--line);
+cursor:pointer;font-size:12px;color:var(--dim)}
+.f.on{background:var(--acc);color:#0b1020;border-color:var(--acc);font-weight:700}
+.scrollbox{max-height:340px;overflow-y:auto;overscroll-behavior:contain}
+.scrollbox::-webkit-scrollbar{width:9px}
+.scrollbox::-webkit-scrollbar-thumb{background:#2f3846;border-radius:5px}
+.tierrow td{border-top:1px dashed #39445699}
+.tiertag{color:var(--warn);font-size:10px;letter-spacing:.1em}
+.run{background:#2a2113;border-color:#4a3a18;color:var(--warn)}
+.wait table{font-size:13px}
+.wait .cost{color:var(--bad);font-weight:700}
+.wait .cheap{color:var(--go)}
 @media(max-width:640px){body{padding:8px}td{padding:3px 4px}}
 </style></head><body>
 <div id=tabs class=tabs></div><div id=app>loading…</div>
@@ -270,6 +347,8 @@ function render(d){
    : d.until==null?`draft not started / slot unknown`
    : `you're up in <span class=clock>${d.until}</span> pick${d.until==1?'':'s'}`;
  h+=` · slot ${d.slot??'?'} · ${d.npicks} picks in · ${esc(d.ts)}</div>`;
+ if(d.run) h+=`<div class="card run"><b>${d.run.pos} run</b> — ${d.run.n} of the last `
+   +`${d.run.of} picks. Get ahead of it or wait it out deliberately.</div>`;
  h+=entry;
  h+=`<div class=card><div class=lbl>your roster (${d.roster.length})</div><div class=roster>`;
  h+= d.roster.length?d.roster.map(r=>`<span>${esc(r.n)} ${pos(r.p)}</span>`).join(''):'<span>—</span>';
@@ -293,7 +372,8 @@ function render(d){
  h+= d.last.map(r=>`<span>${r.no}. ${esc(r.n)} ${pos(r.p)}</span>`).join('')||'<span>—</span>';
  return h+`</div></div>`;
 }
-let POOL=[];
+let POOL=[];let FILTER='ALL';
+function setf(p){FILTER=p;const d=window._last;if(d)document.getElementById('app').innerHTML=render(d);}
 function hits(){
  const q=(document.getElementById('q').value||'').toLowerCase().trim();
  const box=document.getElementById('hits');
@@ -310,12 +390,14 @@ async function take(n){
  document.getElementById('q').value='';document.getElementById('hits').innerHTML='';
  const d=await (await fetch(`/pick?league=${encodeURIComponent(LEAGUE)}`
    +`&name=${encodeURIComponent(n)}&mine=${mine}`)).json();
- if(!d.error){POOL=d.pool||[];tabs(d);document.getElementById('app').innerHTML=render(d);}
+ if(!d.error){POOL=d.pool||[];window._last=d;tabs(d);
+   document.getElementById('app').innerHTML=render(d);}
  const q=document.getElementById('q'); if(q) q.focus();
 }
 async function undoPick(){
  const d=await (await fetch(`/undo?league=${encodeURIComponent(LEAGUE)}`)).json();
- if(!d.error){POOL=d.pool||[];tabs(d);document.getElementById('app').innerHTML=render(d);}
+ if(!d.error){POOL=d.pool||[];window._last=d;tabs(d);
+   document.getElementById('app').innerHTML=render(d);}
 }
 async function tick(){
  try{
@@ -323,7 +405,7 @@ async function tick(){
   if(d.error){document.getElementById('app').innerHTML=
      `<div class="card err">${esc(d.error)}</div>`;}
   else{
-    LEAGUE=d.league;POOL=d.pool||[];tabs(d);
+    LEAGUE=d.league;POOL=d.pool||[];window._last=d;tabs(d);
     const q=document.getElementById('q');
     const keep=q?{v:q.value,f:document.activeElement===q}:null;
     document.getElementById('app').innerHTML=render(d);
