@@ -26,3 +26,6 @@ leagues/leagues.yaml
 
 # cached API pulls
 data/
+
+# generated boards
+boards/

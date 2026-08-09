@@ -66,12 +66,17 @@ def fetch(limit: int = 600, max_age_hours: int = 12, force: bool = False) -> lis
                 line[name] = float(val)
         if not line:
             continue
+        own = p.get("ownership") or {}
         out.append({
             "espn_id": p.get("id"),
             "name": p.get("fullName"),
             "position": pos,
             "pro_team_id": p.get("proTeamId"),
             "espn_points": round(season.get("appliedTotal") or 0.0, 2),
+            # ESPN's own market price — the real ADP in ESPN leagues
+            "adp": own.get("averageDraftPosition") or 0.0,
+            "auction_value": own.get("auctionValueAverage") or 0.0,
+            "pct_owned": round(own.get("percentOwned") or 0.0, 1),
             "stats": line,
         })
 
