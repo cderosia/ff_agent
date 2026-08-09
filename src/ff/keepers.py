@@ -22,7 +22,8 @@ SLEEPER = "https://api.sleeper.app/v1"
 
 
 def roster_and_costs(prev_league_id: str, owner_id: str, players_blob: dict,
-                     escalation: int = 1, undrafted_round: int | None = None) -> list[dict]:
+                     escalation: int = 1, undrafted_round: int | None = None,
+                     round_one_keepable: bool = True) -> list[dict]:
     """Last season's roster with each player's keeper cost in draft rounds.
 
     `escalation` is how many rounds earlier a kept player costs (house rule here
@@ -44,9 +45,18 @@ def roster_and_costs(prev_league_id: str, owner_id: str, players_blob: dict,
         name = f"{pl.get('first_name','')} {pl.get('last_name','')}".strip()
         pos = pl.get("position")
         pick = drafted.get(pid)
+        ineligible = False
         if pick:
             drafted_round = pick["round"]
-            cost = max(1, drafted_round - escalation)
+            cost = drafted_round - escalation
+            if cost < 1:
+                # No round 0 to escalate into. Most leagues make these players
+                # simply ineligible rather than inventing a cost.
+                if round_one_keepable:
+                    cost = 1
+                else:
+                    ineligible = True
+                    cost = None
         else:
             drafted_round = None
             cost = undrafted_round or max_round      # house rule; confirm this
@@ -57,6 +67,7 @@ def roster_and_costs(prev_league_id: str, owner_id: str, players_blob: dict,
             "drafted_round": drafted_round,
             "cost_round": cost,
             "was_undrafted": pick is None,
+            "ineligible": ineligible,
         })
     return out
 
@@ -85,6 +96,11 @@ def value(candidates: list[dict], rows: list[dict], league,
 
     out = []
     for c in candidates:
+        if c.get("ineligible"):
+            out.append({**c, "vorp": None, "surplus": None, "alt": None,
+                        "alt_vorp": None, "pick_number": None,
+                        "note": "not keepable (drafted round 1)"})
+            continue
         row = board.get(key(c["name"], c["position"]))
         alt, pno = expected_at(c["cost_round"])
         rec = dict(c)

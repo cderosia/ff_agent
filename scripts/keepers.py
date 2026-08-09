@@ -75,7 +75,8 @@ def render(league, res, cfg, meta) -> str:
     L.append("|:--|---|---|---|---:|---|---:|")
     for r in res:
         if r.get("surplus") is None:
-            L.append(f"| | {r['name']} | {r['position']} | rd{r['cost_round']} | — | "
+            cost_s = f"rd{r['cost_round']}" if r.get('cost_round') else "—"
+            L.append(f"| | {r['name']} | {r['position']} | {cost_s} | — | "
                      f"_{r['note']}_ | — |")
             continue
         mark = "**KEEP**" if r in positive else ""
@@ -88,7 +89,8 @@ def render(league, res, cfg, meta) -> str:
     L.append("These were not readable from the API and are set in `leagues.yaml`. "
              "**Confirm them with your commissioner** — they change the answer:")
     L.append("")
-    L.append(f"- A round-1 pick still costs **round {k['round_one_cost']}** (can't escalate above).")
+    r1 = k.get("round_one_keepable", True)
+    L.append(f"- Round-1 picks are **{'keepable at a round-1 cost' if r1 else 'NOT keepable'}**.")
     L.append(f"- Undrafted / waiver adds cost a **round-{k['undrafted_round']}** pick.")
     L.append(f"- A player acquired by trade or waiver keeps the round the "
              f"**original drafter** spent: `{k['acquired_keeps_original_round']}`.")
@@ -131,6 +133,7 @@ def main():
             prev, cfg["owner_id"], blob,
             escalation=k.get("escalation", 1),
             undrafted_round=k.get("undrafted_round"),
+            round_one_keepable=k.get("round_one_keepable", True),
         )
         cands = [c for c in cands if c["position"] not in ("K", "DEF", "DST")]
         res = keepers.value(cands, rows, L)
