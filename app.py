@@ -144,8 +144,8 @@ st.sidebar.caption(
 # ---------------------------------------------------------------------------
 # tabs
 # ---------------------------------------------------------------------------
-t_board, t_draft, t_waiver, t_trade, t_keep = st.tabs(
-    ["Board", "Live draft", "Waivers", "Trades", "Keepers"])
+t_board, t_draft, t_waiver, t_trade, t_keep, t_report = st.tabs(
+    ["Board", "Live draft", "Waivers", "Trades", "Keepers", "Report"])
 
 
 # ---- Board ----------------------------------------------------------------
@@ -433,3 +433,48 @@ with t_keep:
                 "Surplus": round(r["surplus"]) if r.get("surplus") is not None else None,
                 "Note": r.get("note", ""),
             } for r in res]), hide_index=True, width='stretch')
+
+
+# ---- Report ---------------------------------------------------------------
+with t_report:
+    st.header("Weekly report")
+    st.caption("The assembled digest — the same thing that gets emailed. "
+               "Tuesday covers claims before waivers run; Wednesday covers "
+               "lineups and trades once they've cleared.")
+
+    if L.platform != "sleeper" or not cfg.get("owner_id"):
+        st.info("Report generation currently needs a Sleeper league with owner_id set.")
+    else:
+        c1, c2, c3 = st.columns([1, 1, 2])
+        replay = c1.toggle("Replay a past week", value=True, key="rep")
+        season = 2025 if replay else 2026
+        week = c2.number_input("Week", 4, 17, 10) if replay else 1
+
+        if st.button("Build report", type="primary"):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "send_weekly", ROOT / "scripts" / "send_weekly.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            from ff import notify
+            with st.spinner("building…"):
+                claims, movers, fair, drops = mod.gather(L, cfg, season, int(week), replay)
+                html = notify.render_email(L, int(week), claims, movers, fair,
+                                           drops, replay)
+            st.session_state["report_html"] = html
+            st.session_state["report_meta"] = (L.name, int(week))
+
+        if st.session_state.get("report_html"):
+            html = st.session_state["report_html"]
+            name, wk = st.session_state["report_meta"]
+            st.components.v1.html(html, height=900, scrolling=True)
+            d1, d2 = st.columns([1, 3])
+            d1.download_button("Download HTML", html,
+                               file_name=f"{name}-w{wk}.html", mime="text/html")
+            if d2.button("Email it to me now"):
+                from ff import notify
+                try:
+                    top = "report"
+                    st.success(notify.send(f"Week {wk} · {name}", html))
+                except Exception as e:
+                    st.error(f"{e}  —  set SMTP_USER / SMTP_PASS / REPORT_TO in .env")
