@@ -116,7 +116,7 @@ if not leagues:
     st.stop()
 
 names = [l.name for l in leagues]
-choice = st.sidebar.radio("League", names, index=0)
+choice = st.sidebar.radio("League", names, index=0, key="league")
 L, rows, meta = hydrate(choice)
 cfg = cfgs.get(choice, {})
 
@@ -144,8 +144,8 @@ st.sidebar.caption(
 # ---------------------------------------------------------------------------
 # tabs
 # ---------------------------------------------------------------------------
-t_board, t_draft, t_waiver, t_trade, t_keep, t_report = st.tabs(
-    ["Board", "Live draft", "Waivers", "Trades", "Keepers", "Report"])
+t_board, t_draft, t_lineup, t_waiver, t_trade, t_keep, t_report = st.tabs(
+    ["Board", "Live draft", "Lineup", "Waivers", "Trades", "Keepers", "Report"])
 
 
 # ---- Board ----------------------------------------------------------------
@@ -235,6 +235,88 @@ with t_draft:
         } for r in recs]), hide_index=True, width='stretch')
 
     draft_panel()
+
+
+# ---- Lineup ---------------------------------------------------------------
+with t_lineup:
+    st.header("Set your lineup")
+    st.caption("Weekly projections from both sources, blended and scored under this "
+               "league's rules. Players who are out or on bye are excluded from the "
+               "lineup, not just flagged.")
+
+    if L.platform != "sleeper" or not cfg.get("owner_id"):
+        st.info("Lineups currently read Sleeper rosters only.")
+    else:
+        from ff import lineup as lineup_mod
+        c1, c2 = st.columns([1, 3])
+        lp_replay = c1.toggle("Replay a past week", value=True, key="lp_rep")
+        wk = int(c2.slider("Week", 1, 18, 10, key="lp_wk"))
+        league_id = L.raw.get("previous_league_id") if lp_replay else L.league_id
+
+        blob = get_blob()
+        by_key = {key(r["name"], r["position"]): r for r in rows}
+        mine, _ = trade_mod.league_rosters(league_id, blob, by_key, cfg.get("owner_id"))
+
+        if not mine:
+            st.info("No roster yet — this fills in after your draft.")
+        else:
+            with st.spinner("scoring the week…"):
+                wp = lineup_mod.weekly_points(wk, L.scoring)
+                for pl in mine:
+                    pts, n, sp = wp.get(key(pl["name"], pl["position"]), (0.0, 0, 0.0))
+                    pl["week_points"] = round(pts, 1)
+                    pl["wk_spread"] = round(sp, 1)
+                    pl["status"], pl["why"] = lineup_mod.availability(
+                        blob, pl["name"], pl["position"], pl.get("team"), wk, pts)
+                filled, bench = lineup_mod.optimize(mine, L)
+                calls = lineup_mod.close_calls(filled, bench, L)
+                outdoor = lineup_mod.outdoor_games(wk)
+
+            total = sum(p["week_points"] for ps in filled.values() for p in ps)
+            m = st.columns(3)
+            m[0].metric("Projected", f"{total:.1f}")
+            m[1].metric("Unavailable",
+                        sum(1 for p in mine if p["status"] in ("out", "unknown")))
+            m[2].metric("Close calls", len(calls))
+
+            st.subheader("Start")
+            st.dataframe(pd.DataFrame([{
+                "Slot": slot, "Player": p["name"], "Pos": p["pos_rank"],
+                "Team": p.get("team") or "", "Proj": p["week_points"],
+                "Spread": p.get("wk_spread", 0),
+                "Flag": ("⚠ " + p["why"]) if p["status"] == "risk" else "",
+                "Venue": "outdoors" if outdoor.get(p.get("team")) else "dome",
+            } for slot, ps in filled.items() for p in ps]),
+                hide_index=True, width='stretch')
+
+            st.subheader("Bench")
+            st.dataframe(pd.DataFrame([{
+                "Player": p["name"], "Pos": p["pos_rank"],
+                "Team": p.get("team") or "", "Proj": p["week_points"],
+                "Status": p["status"].upper() if p["status"] != "ok" else "",
+                "Reason": p["why"],
+            } for p in sorted(bench, key=lambda x: -x["week_points"])],),
+                hide_index=True, width='stretch')
+
+            if calls:
+                st.subheader("Too close to call automatically")
+                for c in calls[:6]:
+                    st.markdown(
+                        f"- **{c['slot']}**: starting **{c['starting']['name']}** "
+                        f"({c['starting']['week_points']:.1f}) over "
+                        f"**{c['alternative']['name']}** "
+                        f"({c['alternative']['week_points']:.1f}) — gap "
+                        f"**{c['gap']}**")
+                st.caption("Within 1.5 points is inside the noise of a projection. "
+                           "Use matchup, weather, or your own read to break these.")
+
+            windy = [p for ps in filled.values() for p in ps
+                     if outdoor.get(p.get("team")) and p["position"] in ("QB", "TE", "WR")]
+            if windy:
+                st.caption("Playing outdoors: " +
+                           ", ".join(f"{p['name']} ({p.get('team')})" for p in windy) +
+                           " — check wind before kickoff; above ~15mph it hurts the "
+                           "passing game meaningfully.")
 
 
 # ---- Waivers --------------------------------------------------------------
@@ -446,9 +528,11 @@ with t_report:
         st.info("Report generation currently needs a Sleeper league with owner_id set.")
     else:
         c1, c2, c3 = st.columns([1, 1, 2])
-        replay = c1.toggle("Replay a past week", value=True, key="rep")
+        kind = c1.radio("Which report", ["Tuesday — waivers", "Wednesday — lineup"],
+                        key="rkind")
+        replay = c2.toggle("Replay a past week", value=True, key="rep")
         season = 2025 if replay else 2026
-        week = c2.number_input("Week", 4, 17, 10) if replay else 1
+        week = c3.number_input("Week", 4, 17, 10) if replay else 1
 
         if st.button("Build report", type="primary"):
             import importlib.util
@@ -459,8 +543,12 @@ with t_report:
             from ff import notify
             with st.spinner("building…"):
                 claims, movers, fair, drops = mod.gather(L, cfg, season, int(week), replay)
-                html = notify.render_email(L, int(week), claims, movers, fair,
-                                           drops, replay)
+                if kind.startswith("Wednesday"):
+                    html = mod.build_lineup_email(L, cfg, season, int(week),
+                                                  replay, fair)
+                else:
+                    html = notify.render_email(L, int(week), claims, movers, fair,
+                                               drops, replay)
             st.session_state["report_html"] = html
             st.session_state["report_meta"] = (L.name, int(week))
 

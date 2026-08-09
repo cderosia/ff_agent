@@ -94,11 +94,33 @@ def gather(L, cfg, season, week, replay):
     return claims, movers, fair, drops
 
 
+def build_lineup_email(L, cfg, season, week, replay, fair):
+    """Wednesday email: waivers have cleared, so lead with the lineup."""
+    from ff import lineup as lineup_mod
+    blob = json.loads((ROOT / "data" / "raw" / "sleeper_players.json").read_text())
+    league_id = L.raw.get("previous_league_id") if replay else L.league_id
+    rows, _ = board_mod.build(fetch(), L)
+    by_key = {key(r["name"], r["position"]): r for r in rows}
+    mine, _ = trades.league_rosters(league_id, blob, by_key, cfg.get("owner_id"))
+
+    wp = lineup_mod.weekly_points(week, L.scoring)
+    for p in mine:
+        pts, n, sp = wp.get(key(p["name"], p["position"]), (0.0, 0, 0.0))
+        p["week_points"] = round(pts, 1)
+        p["status"], p["why"] = lineup_mod.availability(
+            blob, p["name"], p["position"], p.get("team"), week, pts)
+    filled, bench = lineup_mod.optimize(mine, L)
+    calls = lineup_mod.close_calls(filled, bench, L)
+    return notify.render_lineup_email(L, week, filled, bench, calls, fair,
+                                      lineup_mod.outdoor_games(week), replay)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--replay", nargs=2, type=int, metavar=("SEASON", "WEEK"))
     ap.add_argument("--league")
+    ap.add_argument("--kind", choices=["tue","wed"], default="tue")
     args = ap.parse_args()
 
     replay = args.replay is not None
@@ -122,16 +144,22 @@ def main():
             print(f"  FAIL {L.name}: {type(e).__name__}: {e}")
             continue
 
-        html = notify.render_email(L, week, claims, movers, fair, drops, replay)
-        path = OUT / f"{L.name}-w{week}-email.html"
+        if args.kind == "wed":
+            html = build_lineup_email(L, cfg, season, week, replay, fair)
+        else:
+            html = notify.render_email(L, week, claims, movers, fair, drops, replay)
+        path = OUT / f"{L.name}-w{week}-{args.kind}.html"
         path.write_text(html)
 
         if args.dry_run:
             print(f"  {L.name}: {len(claims)} adds, {len(fair)} trades "
                   f"-> {path.relative_to(ROOT)} (not sent)")
         else:
-            top = claims[0]["name"] if claims else "no adds"
-            subject = f"Week {week} · {L.name} — {top}"
+            if args.kind == "wed":
+                subject = f"Week {week} lineup · {L.name}"
+            else:
+                top = claims[0]["name"] if claims else "no adds"
+                subject = f"Week {week} · {L.name} — {top}"
             print(f"  {L.name}: {notify.send(subject, html)}")
 
 

@@ -216,3 +216,91 @@ def send(subject: str, html: str, to: str | None = None) -> str:
         s.login(user, pw)
         s.send_message(msg)
     return f"sent to {to}"
+
+
+def render_lineup_email(league, week, filled, bench, calls, trades_fair,
+                        outdoor=None, replay=False) -> str:
+    """Wednesday: waivers have cleared, so this is about who to start."""
+    outdoor = outdoor or {}
+    parts = []
+    total = sum(p["week_points"] for ps in filled.values() for p in ps)
+    parts.append(
+        f'<div style="font:600 24px/1.25 Georgia,serif;color:{INK};margin:0 0 4px">'
+        f"Week {week} lineup · {league.name}</div>")
+    flag = (' <span style="color:%s">· replay</span>' % COIN) if replay else ""
+    parts.append(
+        f'<div style="color:{DIM};font-size:12.5px;'
+        f'font-family:-apple-system,Helvetica,Arial,sans-serif">'
+        f"{league.teams}-team · projected {total:.1f} points{flag}</div>")
+
+    unavailable = [p for p in bench if p.get("status") in ("out", "unknown")]
+    if unavailable:
+        names = ", ".join(f'{p["name"]} ({p["why"]})' for p in unavailable[:5])
+        parts.append(
+            f'<div style="margin:20px 0 0;padding:13px 16px;background:{CARD};'
+            f'border:1px solid {LINE};border-left:3px solid {LOSS};border-radius:4px;'
+            f'font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:13.5px;'
+            f'color:{INK}"><b>Not startable:</b> <span style="color:{DIM}">{names}</span></div>')
+
+    parts.append(_h2("Start"))
+    rows = []
+    for slot, ps in filled.items():
+        for p in ps:
+            note = ""
+            if p.get("status") == "risk":
+                note = f'<span style="color:{COIN}">{p["why"]}</span>'
+            elif outdoor.get(p.get("team")):
+                note = f'<span style="color:{DIM}">outdoors</span>'
+            rows.append([
+                _cell(slot, "left", DIM, "700", False, "11px"),
+                _cell(f'{p["name"]}<span style="color:{DIM};font-size:11px;'
+                      f'margin-left:7px">{p["pos_rank"]}</span>'),
+                _cell(f'{p["week_points"]:.1f}', "right", INK, "700", True),
+                _cell(note or "&nbsp;", "right", DIM, "400", False, "12px"),
+            ])
+    parts.append(_table(["Slot", "Player", "Proj", ""], rows,
+                        ["left", "left", "right", "right"]))
+
+    if calls:
+        parts.append(_h2("Too close to call"))
+        parts.append(_p("Within 1.5 points is inside a projection's noise. "
+                        "Break these on matchup, weather, or your own read."))
+        for c in calls[:5]:
+            parts.append(
+                f'<div style="margin:8px 0 0;font-size:13.5px;color:{INK};'
+                f'font-family:-apple-system,Helvetica,Arial,sans-serif">'
+                f'<b>{c["slot"]}</b> — starting {c["starting"]["name"]} '
+                f'<span style="color:{DIM}">({c["starting"]["week_points"]:.1f})</span> '
+                f'over {c["alternative"]["name"]} '
+                f'<span style="color:{DIM}">({c["alternative"]["week_points"]:.1f}), '
+                f'gap {c["gap"]}</span></div>')
+
+    if trades_fair:
+        parts.append(_h2("Trades worth sending"))
+        for t2 in trades_fair[:3]:
+            g = " + ".join(p["name"] for p in t2["give"])
+            r = " + ".join(p["name"] for p in t2["get"])
+            parts.append(
+                f'<div style="margin:9px 0 0;padding:12px 14px;background:{CARD};'
+                f'border:1px solid {LINE};border-left:3px solid {GAIN};border-radius:4px;'
+                f'font-family:-apple-system,Helvetica,Arial,sans-serif">'
+                f'<b style="font-size:14px;color:{INK}">{t2["team"]}</b>'
+                f'<div style="color:{DIM};font-size:13.5px;margin-top:3px">'
+                f'send <b style="color:{INK}">{g}</b> → get '
+                f'<b style="color:{INK}">{r}</b></div>'
+                f'<div style="margin-top:6px;font-family:ui-monospace,Menlo,monospace;'
+                f'font-size:12.5px;color:{DIM}">you '
+                f'<b style="color:{GAIN}">{t2["my_delta"]:+.0f}</b> · them '
+                f'<b style="color:{GAIN}">{t2["their_delta"]:+.0f}</b> · optics '
+                f'<b style="color:{INK}">{t2["optics"]:+.0f}</b></div></div>')
+
+    parts.append(
+        f'<div style="margin-top:28px;padding-top:14px;border-top:1px solid {LINE};'
+        f'color:{DIM};font-size:11.5px;'
+        f'font-family:-apple-system,Helvetica,Arial,sans-serif">'
+        f"Weekly projections blended from ESPN and Rotowire, scored under this "
+        f"league's rules. Byes from the NFL schedule, injury status from Sleeper.</div>")
+
+    return (f'<body style="margin:0;padding:0;background:#F2F4F7">'
+            f'<div style="max-width:640px;margin:0 auto;padding:26px 18px 40px">'
+            f"{''.join(parts)}</div></body>")
