@@ -1,0 +1,102 @@
+# ============================================================================
+# YOUR 5 LEAGUES — fill in one block per league, then I auto-pull the rest.
+# ============================================================================
+#
+# You do NOT need to type scoring rules or roster slots. All three platforms
+# expose full league settings via API. Give me the ID and I'll derive:
+#   scoring coefficients, roster slots, team count, waiver type,
+#   FAAB budget, waiver process day, playoff weeks.
+#
+# Everything below marked OPTIONAL is only for things the API can't tell me.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# WHERE TO FIND EACH ID
+# ---------------------------------------------------------------------------
+#
+# SLEEPER  — open the league in a browser:
+#   https://sleeper.com/leagues/1234567890123456789/team
+#                             ^^^^^^^^^^^^^^^^^^^^^ that's league_id
+#   Nothing else needed. Sleeper's API is fully public.
+#
+# ESPN     — open the league:
+#   https://fantasy.espn.com/football/team?leagueId=123456&seasonId=2026
+#                                                   ^^^^^^ that's league_id
+#   If the league is PRIVATE I also need two cookies (see note at bottom).
+#
+# YAHOO    — open the league:
+#   https://football.fantasysports.yahoo.com/f1/123456
+#                                               ^^^^^^ that's the league number
+#   Yahoo needs OAuth; I'll walk you through a one-time app registration.
+#   The full key looks like  nfl.l.123456  — just give me the number.
+#
+# ---------------------------------------------------------------------------
+
+
+leagues:
+
+  - name: league-one
+    platform: ""               # sleeper | espn | yahoo
+    league_id: ""                   # <-- REQUIRED
+    draft_datetime: ""              # <-- REQUIRED e.g. "2026-08-24 20:00" (your local time)
+    notes: ""                       # OPTIONAL: anything odd about this league
+
+  - name: ""
+    platform: ""
+    league_id: ""
+    draft_datetime: ""
+    notes: ""
+
+  - name: ""
+    platform: ""
+    league_id: ""
+    draft_datetime: ""
+    notes: ""
+
+  - name: ""
+    platform: ""
+    league_id: ""
+    draft_datetime: ""
+    notes: ""
+
+  - name: ""
+    platform: ""
+    league_id: ""
+    draft_datetime: ""
+    notes: ""
+
+
+# ---------------------------------------------------------------------------
+# THINGS THE API CANNOT TELL ME — worth a line in `notes` if true
+# ---------------------------------------------------------------------------
+#
+#   - Keeper or dynasty league, and who you're keeping at what cost
+#   - Draft order / your draft slot, if already known
+#   - Auction draft rather than snake (changes the board completely)
+#   - Any house rules not encoded in platform settings
+#     (side pots, trade veto norms, "we always..." conventions)
+#   - League tendencies you know from experience
+#     ("this league reaches hard on QBs", "nobody in here streams defenses")
+#
+# That last one is real signal. Layer B measures how your *platform's* national
+# userbase drafts, but a 12-person league's actual habits can deviate a lot
+# from that, and you're the only source for it.
+#
+# ---------------------------------------------------------------------------
+# PRIVATE ESPN LEAGUES — cookies
+# ---------------------------------------------------------------------------
+#
+# Only needed if the ESPN league isn't publicly viewable. In Chrome, logged in
+# at espn.com:  DevTools > Application > Cookies > espn.com
+# Copy the values of  espn_s2  and  SWID.
+#
+# DO NOT paste them in this file. They're account credentials — anyone with
+# them can act as you on ESPN. Put them in a `.env` file (which will be
+# gitignored) and I'll read them from there:
+#
+#     ESPN_S2=AEB...
+#     ESPN_SWID={XXXXXXXX-XXXX-...}
+#
+# Same goes for Yahoo's OAuth client secret.
+# ---------------------------------------------------------------------------

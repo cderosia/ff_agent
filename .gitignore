@@ -1,0 +1,25 @@
+# ---- SECRETS — never commit ----
+.env
+.env.*
+!.env.example
+*.pem
+tokens/
+yahoo_token.json
+
+# ---- data caches ----
+data/raw/
+*.pkl
+scratch/
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ---- macOS ----
+.DS_Store
+
+# personal league config (IDs + strategy) — keep private
+leagues/leagues.yaml
