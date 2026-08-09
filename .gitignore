@@ -29,3 +29,6 @@ data/
 
 # generated boards
 boards/
+
+# large upstream player blob
+data/raw/sleeper_players.json

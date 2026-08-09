@@ -47,6 +47,14 @@ leagues:
     league_id: ""
     draft_datetime: ""
     notes: ""
+    # --- optional: keeper leagues only ---
+    # owner_id: ""              # your platform user_id
+    # keepers:
+    #   max: 5
+    #   escalation: 1           # kept player costs N rounds earlier than drafted
+    #   round_one_cost: 1
+    #   undrafted_round: 16
+    #   acquired_keeps_original_round: true
 
   - name: ""
     platform: ""
