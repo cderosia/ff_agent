@@ -68,11 +68,36 @@ def format_for(league) -> str:
     return "standard"
 
 
+def sleeper(projections: list[dict], scoring_format: str = "ppr") -> dict:
+    """Sleeper's own ADP, carried on its projection payload.
+
+    Sleeper has no standalone ADP endpoint, but the projections feed includes
+    adp_ppr / adp_half_ppr / adp_std -- the real price in Sleeper drafts, which
+    beats a generic blended proxy for a Sleeper league.
+    """
+    out = {}
+    for p in projections:
+        adps = p.get("sleeper_adp") or {}
+        v = adps.get(scoring_format)
+        # Sleeper uses 999/1000 as its undrafted sentinel
+        if v and 0 < v < 900:
+            out[key(p["name"], p["position"])] = v
+    return out
+
+
 def market_for(league, projections: list[dict]) -> tuple[dict, str]:
-    """The right ADP source for this league. Returns (adp_map, source_label)."""
+    """The right ADP source for this league. Returns (adp_map, source_label).
+
+    Prefer the platform's own market -- that's the room you're actually drafting
+    in. FFC is only a fallback when the platform publishes nothing usable.
+    """
+    fmt = format_for(league)
     if league.platform == "espn":
         m = espn(projections)
         if m:
             return m, "ESPN ADP"
-    fmt = format_for(league)
+    if league.platform == "sleeper":
+        m = sleeper(projections, fmt)
+        if len(m) >= 100:                  # enough depth to rank against
+            return m, f"Sleeper ADP ({fmt})"
     return ffc(fmt), f"FFC {fmt}"

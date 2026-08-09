@@ -62,13 +62,28 @@ def render(league, rows, meta) -> str:
 
     L.append("## Full board")
     L.append("")
-    L.append("| # | player | pos | proj | vorp | market | edge |")
-    L.append("|---:|---|---|---:|---:|---:|---:|")
+    L.append("| # | player | pos | proj | vorp | market | edge | src | spread |")
+    L.append("|---:|---|---|---:|---:|---:|---:|:--:|---:|")
     for r in rows[:180]:
         edge = f"{r['edge']:+d}" if r["edge"] is not None else "—"
         mkt = r["adp_rank"] if r["adp_rank"] else "—"
+        src = "2" if r.get("n_sources", 1) > 1 else "1"
+        sp = f"{r['spread']:.0f}" if r.get("spread") else "—"
         L.append(f"| {r['vbd_rank']} | {r['name']} | {r['pos_rank']} | "
-                 f"{r['points']:.0f} | {r['vorp']:.0f} | {mkt} | {edge} |")
+                 f"{r['points']:.0f} | {r['vorp']:.0f} | {mkt} | {edge} | {src} | {sp} |")
+    L.append("")
+    L.append("## Where the projections disagree")
+    L.append("")
+    L.append("Both sources scored under this league's rules. Big gaps mean low "
+             "confidence — treat these as range bets, not point estimates.")
+    L.append("")
+    L.append("| player | pos | you | espn | sleeper | disagree |")
+    L.append("|---|---|---:|---:|---:|---:|")
+    contested = [r for r in rows if r.get("n_sources", 1) > 1 and r["vbd_rank"] <= 120]
+    for r in sorted(contested, key=lambda r: -r.get("rel_spread", 0))[:12]:
+        ps = r["per_source"]
+        L.append(f"| {r['name']} | {r['pos_rank']} | {r['vbd_rank']} | "
+                 f"{ps.get('espn','—')} | {ps.get('sleeper','—')} | {r['rel_spread']*100:.0f}% |")
     L.append("")
     return "\n".join(L)
 

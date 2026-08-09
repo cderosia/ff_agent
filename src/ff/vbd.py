@@ -67,12 +67,30 @@ SKIP_POSITIONS = {"K", "DST"}
 
 def build(projections: list[dict], league) -> list[dict]:
     """Score projections under one league's rules and attach VORP."""
-    scored = [{
-        "name": p["name"],
-        "position": p["position"],
-        "espn_id": p["espn_id"],
-        "points": round(score(p["stats"], league.scoring), 2),
-    } for p in projections if p["position"] not in SKIP_POSITIONS]
+    scored = []
+    for p in projections:
+        if p["position"] in SKIP_POSITIONS:
+            continue
+        # Score each source separately too: where they disagree, confidence is low.
+        per_source = {src: score(line, league.scoring)
+                      for src, line in (p.get("source_lines") or {}).items()}
+        spread = (max(per_source.values()) - min(per_source.values())
+                  if len(per_source) > 1 else 0.0)
+        # Raw point spread scales with volume, so it just ranks high scorers and
+        # picks up Sleeper's systematic ~5-8% discount. Relative spread measures
+        # actual disagreement.
+        mean_pts = (sum(per_source.values()) / len(per_source)) if per_source else 0.0
+        rel_spread = (spread / mean_pts) if mean_pts > 20 else 0.0
+        scored.append({
+            "name": p["name"],
+            "position": p["position"],
+            "espn_id": p.get("espn_id"),
+            "points": round(score(p["stats"], league.scoring), 2),
+            "n_sources": p.get("n_sources", 1),
+            "spread": round(spread, 1),
+            "rel_spread": round(rel_spread, 3),
+            "per_source": {k: round(v, 1) for k, v in per_source.items()},
+        })
 
     # Drop positions the league doesn't start at all
     started = set()
