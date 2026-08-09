@@ -73,7 +73,7 @@ def _p(text, size="13.5px"):
             f"font-family:-apple-system,Helvetica,Arial,sans-serif\">{text}</p>")
 
 
-CALL_COLOR = {"claim": GAIN, "wait": COIN, "skip": DIM, "?": DIM}
+CALL_COLOR = {"claim": GAIN, "bid": GAIN, "wait": COIN, "skip": DIM, "?": DIM}
 
 
 def render_email(league, week, claims, movers, trades_fair, drops, replay=False) -> str:
@@ -114,9 +114,14 @@ def render_email(league, week, claims, movers, trades_fair, drops, replay=False)
     # --- waiver table -------------------------------------------------------
     if claims:
         parts.append(_h2("Worth adding"))
-        parts.append(_p("Ranked by what each adds to <i>your</i> starting lineup. "
-                        "No money in these leagues — the cost of a claim is your "
-                        "waiver position, so most weeks the right move is to wait."))
+        if league.waiver_style == "faab":
+            parts.append(_p("Ranked by what each adds to <i>your</i> starting lineup. "
+                            "This league runs a FAB budget, so the bid column is a "
+                            "share of what you have left."))
+        else:
+            parts.append(_p("Ranked by what each adds to <i>your</i> starting lineup. "
+                            "No money in this league — the cost of a claim is your "
+                            "waiver position, so most weeks the right move is to wait."))
         rows = []
         for c in claims[:6]:
             col = CALL_COLOR.get(c["call"], DIM)

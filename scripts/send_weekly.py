@@ -74,6 +74,11 @@ def gather(L, cfg, season, week, replay):
             continue
         gain = draft_mod.lineup_value(mine + [row], L, L.replacement) - base
         call, why = weekly.claim_call(gain, heat.get(r.k), L.waiver_style, not replay)
+        if call == "bid":
+            budget = int((cfg.get("manual") or {}).get("faab_budget", 100))
+            rec_bid = weekly.faab_bid(len(claims), budget, max(1, 15 - week),
+                                      heat.get(r.k) is not None)
+            why = f"{why} · open ~${rec_bid}"
         rec = {"name": row["name"], "pos": row["pos_rank"], "gain": gain,
                "ppg": r.ppg, "snap": r.snap_pct_recent, "dsnap": r.snap_delta,
                "tgt": r.targets_recent, "dtgt": r.tgt_delta,

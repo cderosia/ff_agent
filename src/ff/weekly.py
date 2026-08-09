@@ -118,6 +118,21 @@ def trending_adds(hours: int = 24, limit: int = 50) -> dict:
     return {x["player_id"]: x["count"] for x in r.json()} if r.ok else {}
 
 
+def faab_bid(rank: int, budget_left: int, weeks_left: int, contested: bool) -> int:
+    """Opening bid as a share of remaining budget, for FAB leagues only.
+
+    Deliberately simple and legible rather than falsely precise: top targets get
+    real money, depth gets scraps, contested players cost more, and you hoard
+    less as the season runs out.
+    """
+    base = {0: 0.28, 1: 0.18, 2: 0.12, 3: 0.08}.get(rank, 0.04)
+    if contested:
+        base *= 1.5
+    if weeks_left <= 5:
+        base *= 1.35
+    return max(1, int(round(budget_left * base)))
+
+
 def claim_call(gain: float, heat: int, waiver_style: str,
                heat_known: bool = True) -> tuple[str, str]:
     """Claim now, or let him clear and add for free?
@@ -135,6 +150,13 @@ def claim_call(gain: float, heat: int, waiver_style: str,
 
     if gain <= 0:
         return "skip", "doesn't improve your lineup"
+    if waiver_style == "faab":
+        # Money, not position, is the constraint -- so there's no "wait for him
+        # to clear" logic. You either bid or you don't.
+        if not heat_known:
+            return "bid", "can't gauge competition — no trending data for a past week"
+        return "bid", ("contested — bid up" if contested
+                       else "quiet — a low bid should land him")
     if not heat_known:
         # Sleeper's trending feed is live-only, so a replay can't know whether
         # anyone else wanted him. Don't dress that up as "he'll clear".
