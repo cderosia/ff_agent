@@ -35,8 +35,8 @@ def _cached(path: pathlib.Path, max_age_hours: float):
     return None
 
 
-def ffc(scoring_format: str = "ppr", max_age_hours: float = 6.0) -> dict:
-    """FantasyFootballCalculator ADP -> {(name_key, pos): adp}."""
+def ffc(scoring_format: str = "ppr", max_age_hours: float = 6.0) -> tuple[dict, dict]:
+    """FantasyFootballCalculator ADP -> ({key: adp}, {key: adp_stdev})."""
     CACHE.mkdir(parents=True, exist_ok=True)
     path = CACHE / f"ffc_{SEASON}_{scoring_format}.json"
     data = _cached(path, max_age_hours)
@@ -45,7 +45,24 @@ def ffc(scoring_format: str = "ppr", max_age_hours: float = 6.0) -> dict:
         r.raise_for_status()
         data = r.json()
         path.write_text(json.dumps(data))
-    return {key(p["name"], p["position"]): p["adp"] for p in data.get("players", [])}
+    players = data.get("players", [])
+    return ({key(p["name"], p["position"]): p["adp"] for p in players},
+            {key(p["name"], p["position"]): p["stdev"] for p in players
+             if p.get("stdev")})
+
+
+# How far a player actually slides from his ADP. Fit on FFC's own published
+# per-player stdev for 2026 (n=257, r=0.78): stdev ~= 0.102*adp + 1.13. Used for
+# ESPN/Sleeper, which publish an average but no spread; FFC's real per-player
+# number is preferred wherever we have it.
+SD_SLOPE, SD_INTERCEPT = 0.102, 1.13
+
+
+def spread_for(adp: float, known: float | None = None) -> float:
+    """Standard deviation of a player's real draft position."""
+    if known:
+        return float(known)
+    return max(1.0, SD_SLOPE * float(adp or 0) + SD_INTERCEPT)
 
 
 def espn(projections: list[dict]) -> dict:
@@ -85,19 +102,21 @@ def sleeper(projections: list[dict], scoring_format: str = "ppr") -> dict:
     return out
 
 
-def market_for(league, projections: list[dict]) -> tuple[dict, str]:
-    """The right ADP source for this league. Returns (adp_map, source_label).
+def market_for(league, projections: list[dict]) -> tuple[dict, str, dict]:
+    """The right ADP source for this league. Returns (adp_map, label, stdev_map).
 
     Prefer the platform's own market -- that's the room you're actually drafting
     in. FFC is only a fallback when the platform publishes nothing usable.
+    Only FFC publishes a per-player stdev; the others fall back to `spread_for`.
     """
     fmt = format_for(league)
     if league.platform == "espn":
         m = espn(projections)
         if m:
-            return m, "ESPN ADP"
+            return m, "ESPN ADP", {}
     if league.platform == "sleeper":
         m = sleeper(projections, fmt)
         if len(m) >= 100:                  # enough depth to rank against
-            return m, f"Sleeper ADP ({fmt})"
-    return ffc(fmt), f"FFC {fmt}"
+            return m, f"Sleeper ADP ({fmt})", {}
+    m, sd = ffc(fmt)
+    return m, f"FFC {fmt}", sd

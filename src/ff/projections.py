@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import time
 
 import requests
@@ -158,34 +159,133 @@ def fetch_sleeper(max_age_hours: int = 12, force: bool = False) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# FFToday projections
+#
+# The third opinion. ESPN is in-house and Sleeper is Rotowire; with only those
+# two, a disagreement tells you THAT they disagree but not who is right, which
+# makes the spread column a coin flip. FFToday is an independent human-produced
+# set, so it breaks ties and turns spread into a usable confidence signal.
+# ---------------------------------------------------------------------------
+FFTODAY = ("https://www.fftoday.com/rankings/playerproj.php"
+           "?Season={yr}&PosID={pid}&LeagueID=1&cur_page={pg}")
+
+# The table's stat columns, in page order, per position. Every row is
+# [blank, player, team, bye, *these, fantasy_points].
+FFTODAY_COLS = {
+    ("QB", 10): ["pass_cmp", "pass_att", "pass_yds", "pass_td", "pass_int",
+                 "rush_att", "rush_yds", "rush_td"],
+    ("RB", 20): ["rush_att", "rush_yds", "rush_td",
+                 "receptions", "rec_yds", "rec_td"],
+    ("WR", 30): ["receptions", "rec_yds", "rec_td",
+                 "rush_att", "rush_yds", "rush_td"],
+    ("TE", 40): ["receptions", "rec_yds", "rec_td"],
+}
+
+_TAGS = re.compile(r"<[^>]+>")
+_CELL = re.compile(r"<TD[^>]*>(.*?)</TD>", re.S | re.I)
+_LINK = re.compile(r"/stats/players/\d+/", re.I)
+
+
+def _text(cell: str) -> str:
+    return _TAGS.sub("", cell).replace("&nbsp;", " ").replace(",", "").strip()
+
+
+def fetch_fftoday(max_age_hours: int = 12, force: bool = False) -> list[dict]:
+    """FFToday season projections, scraped into the same canonical shape."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    cached = CACHE / f"fftoday_proj_{SEASON}.json"
+    if cached.exists() and not force:
+        if (time.time() - cached.stat().st_mtime) / 3600 < max_age_hours:
+            return json.loads(cached.read_text())
+
+    out = []
+    for (pos, pid), cols in FFTODAY_COLS.items():
+        for page in range(4):                      # paginates 50/page
+            r = requests.get(FFTODAY.format(yr=SEASON, pid=pid, pg=page),
+                             headers=UA, timeout=45)
+            r.raise_for_status()
+            found = 0
+            for chunk in re.split(r"<TR[ >]", r.text, flags=re.I)[1:]:
+                if not _LINK.search(chunk):
+                    continue
+                cells = [_text(c) for c in _CELL.findall(chunk)]
+                # [blank, name, team, bye, *stats, points]
+                if len(cells) < 4 + len(cols) + 1:
+                    continue
+                found += 1
+                line = {}
+                for name, raw in zip(cols, cells[4:4 + len(cols)]):
+                    try:
+                        v = float(raw)
+                    except ValueError:
+                        continue
+                    if v:
+                        line[name] = v
+                if not line:
+                    continue
+                out.append({"name": cells[1], "position": pos,
+                            "team": cells[2] or None, "stats": line})
+            if found < 50:                         # last page for this position
+                break
+
+    cached.write_text(json.dumps(out))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Blend
 # ---------------------------------------------------------------------------
-def fetch(force: bool = False, sources: tuple = ("espn", "sleeper")) -> list[dict]:
-    """Blended projections. Averages each stat across whichever sources have it."""
-    espn = fetch_espn(force=force) if "espn" in sources else []
-    slp = fetch_sleeper(force=force) if "sleeper" in sources else []
+# Three is the cap on purpose. Two cannot break a tie; the third is what makes
+# `spread` mean something. Past three the marginal source moves the top-100 board
+# by only a rank or two, so it buys noise and another thing that can break.
+MAX_SOURCES = 3
+
+FETCHERS = {"espn": fetch_espn, "sleeper": fetch_sleeper, "fftoday": fetch_fftoday}
+
+
+def fetch(force: bool = False,
+          sources: tuple = ("espn", "sleeper", "fftoday")) -> list[dict]:
+    """Blended projections. Averages each stat across whichever sources have it.
+
+    A source that is unreachable is skipped rather than fatal -- a scraped source
+    WILL break eventually, and a draft board from two sources beats no board.
+    """
+    sources = tuple(sources)[:MAX_SOURCES]
+
+    pulled: dict[str, list] = {}
+    for src in sources:
+        try:
+            pulled[src] = FETCHERS[src](force=force)
+        except Exception as e:
+            print(f"  ! projection source '{src}' failed, continuing without it: {e}")
 
     merged: dict = {}
-    for p in espn:
-        merged[key(p["name"], p["position"])] = {
-            **p, "lines": {"espn": p["stats"]}, "sleeper_adp": None,
-        }
-    for p in slp:
-        k = key(p["name"], p["position"])
-        if k in merged:
-            merged[k]["lines"]["sleeper"] = p["stats"]
-            merged[k]["sleeper_adp"] = p["adp"]
-            merged[k]["games"] = p.get("games")
+    for src in sources:
+        for p in pulled.get(src, []):
+            k = key(p["name"], p["position"])
+            rec = merged.get(k)
+            if rec is None:
+                rec = merged[k] = {
+                    "espn_id": None, "name": p["name"], "position": p["position"],
+                    "pro_team_id": None, "espn_points": 0.0, "adp": 0.0,
+                    "auction_value": 0.0, "pct_owned": 0.0, "games": None,
+                    "team": p.get("team"), "lines": {}, "sleeper_adp": None,
+                }
+            rec["lines"][src] = p["stats"]
             if p.get("team"):
-                merged[k]["team"] = p["team"]
-        else:
-            merged[k] = {
-                "espn_id": None, "name": p["name"], "position": p["position"],
-                "pro_team_id": None, "espn_points": 0.0, "adp": 0.0,
-                "auction_value": 0.0, "pct_owned": 0.0, "games": p.get("games"),
-                "team": p.get("team"),
-                "lines": {"sleeper": p["stats"]}, "sleeper_adp": p["adp"],
-            }
+                rec["team"] = p["team"]
+            # Extras are per-source and NOT interchangeable: ESPN's `adp` is a
+            # float, Sleeper's is a dict keyed by scoring format. Carrying them
+            # generically would put a dict in `adp` and break the market join.
+            if src == "espn":
+                for f in ("espn_id", "pro_team_id", "espn_points", "adp",
+                          "auction_value", "pct_owned"):
+                    if p.get(f):
+                        rec[f] = p[f]
+            elif src == "sleeper":
+                rec["sleeper_adp"] = p.get("adp")
+                if p.get("games"):
+                    rec["games"] = p["games"]
 
     out = []
     for k, rec in merged.items():

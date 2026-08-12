@@ -22,7 +22,7 @@ def build(projections: list[dict], league, undrafted_after: int | None = None
     invalidated the original bias hypothesis -- see ANALYSIS.md section 3b.)
     """
     rows = vbd.build(projections, league)
-    market, source = adp_mod.market_for(league, projections)
+    market, source, stdev = adp_mod.market_for(league, projections)
 
     # ESPN assigns sentinel ADPs (400+) to players nobody drafts. Those are
     # "undrafted", not bargains. Cut the market off at a plausible draft depth.
@@ -47,6 +47,9 @@ def build(projections: list[dict], league, undrafted_after: int | None = None
         r["adp_rank"] = mkt_rank.get(k)
         r["your_rank"] = you_rank.get(k)
         r["edge"] = (r["adp_rank"] - r["your_rank"]) if k in shared else None
+        # how far he realistically slides -- drives survival odds during the draft
+        r["adp_sd"] = (adp_mod.spread_for(r["adp"], stdev.get(k))
+                       if r["adp"] else None)
 
     meta = {
         "source": source,

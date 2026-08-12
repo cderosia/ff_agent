@@ -10,12 +10,24 @@ want a glanceable second screen that refreshes itself, not a tool to operate.
 
 Picks are polled on demand per league and cached for a few seconds, so an idle
 league costs nothing and switching is instant.
+
+Practice mode rehearses draft day against bots:
+
+    python3 scripts/draft_server.py --sim work --slot 5 --rounds 3
+    python3 scripts/draft_server.py --sim work --slot 5 --transcribe
+
+The room drafts itself off jittered ADP while a clock runs on you; let it expire
+and it autopicks, exactly like the platform would. `--transcribe` adds the part
+that actually bites in a league with no live feed: every pick the room makes has
+to be typed into the board before the next one lands. Practice picks are written
+to `_sim_<league>.json`, never the real pick file.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import pathlib
+import random
 import socket
 import sys
 import threading
@@ -40,6 +52,7 @@ PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
 PICK_CACHE: dict = {}   # league name -> (timestamp, picks)
 POLL_SECONDS = 4.0
+SIM: dict = {}          # league name -> practice-draft state (see sim_start)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +116,10 @@ def prepare(leagues, cfgs, proj):
 
 
 def manual_path(name):
+    # A practice draft writes to its own file so a rehearsal can never be
+    # mistaken for, or overwrite, the real draft you enter on the day.
+    if name in SIM:
+        return PICKS_DIR / f"_sim_{name}.json"
     return PICKS_DIR / f"{name}.json"
 
 
@@ -132,7 +149,9 @@ def undo_manual_pick(name):
 
 
 def is_manual(name):
-    return CTX[name]["league"].platform not in ("sleeper", "espn")
+    # A practice draft is its own feed, so it reads from the local pick file even
+    # for a league that normally polls ESPN or Sleeper.
+    return name in SIM or CTX[name]["league"].platform not in ("sleeper", "espn")
 
 
 def picks_for(name):
@@ -152,6 +171,229 @@ def picks_for(name):
         picks = draft_mod.espn_picks(L.league_id, ck, c["id_map"])
     PICK_CACHE[name] = (now, picks)
     return picks
+
+
+# ---------------------------------------------------------------------------
+# Practice draft
+#
+# The point is rehearsing the thing that actually goes wrong on draft day: for a
+# league with no live feed, YOU are the feed, and every pick in the room has to
+# be typed in while a clock runs. So this drives the real UI and the real manual
+# entry path rather than a lookalike -- the only fiction is that the other nine
+# managers are bots.
+# ---------------------------------------------------------------------------
+BOT_CAPS = {"QB": 1, "RB": 4, "WR": 4, "TE": 1}   # before the late rounds
+
+
+def slot_of_pick(pick_no: int, teams: int) -> int:
+    """Which draft slot owns `pick_no` in a snake draft."""
+    rnd = (pick_no - 1) // teams + 1
+    i = (pick_no - 1) % teams
+    return i + 1 if rnd % 2 == 1 else teams - i
+
+
+def sim_start(name, slot, rounds, clock, bot_secs, transcribe=False,
+              entry_secs=20, seed=None):
+    L = CTX[name]["league"]
+    SIM[name] = {
+        "slot": slot, "rounds": rounds, "clock": clock, "bot_secs": bot_secs,
+        "total": rounds * L.teams, "deadline": None, "next_bot": 0.0,
+        "done": False, "autopicked": [], "rng": random.Random(seed),
+        # transcribe drill
+        "transcribe": transcribe, "entry_secs": entry_secs,
+        "pending": None, "entry_deadline": 0.0, "missed": [], "typed": [],
+    }
+    manual_path(name).parent.mkdir(parents=True, exist_ok=True)
+    manual_path(name).write_text("[]")
+    PICK_CACHE.pop(name, None)
+
+
+def sim_pick_choice(name):
+    """Who the bot on the clock takes -- chosen, not yet committed.
+
+    Sampling ADP with its own published spread is what makes the room feel real --
+    players slide and get reached for by about as much as they actually do,
+    instead of coming off in a rigid ADP order you could just memorise.
+    """
+    c, L = CTX[name], CTX[name]["league"]
+    s = SIM[name]
+    picks = manual_picks(name)
+    taken = {key(p["name"], p["position"]) for p in picks}
+    pick_no = len(picks) + 1
+    bot_slot = slot_of_pick(pick_no, L.teams)
+    rnd = (pick_no - 1) // L.teams + 1
+
+    have = {}
+    for i, p in enumerate(picks, 1):
+        if slot_of_pick(i, L.teams) == bot_slot:
+            have[p["position"]] = have.get(p["position"], 0) + 1
+
+    best, best_score = None, None
+    for r in c["rows"]:
+        if key(r["name"], r["position"]) in taken:
+            continue
+        cap = BOT_CAPS.get(r["position"])
+        if rnd <= 8 and cap is not None and have.get(r["position"], 0) >= cap:
+            continue
+        adp = r.get("adp") or 999.0
+        sd = r.get("adp_sd") or 8.0
+        score = adp + s["rng"].gauss(0, sd)
+        if best_score is None or score < best_score:
+            best, best_score = r, score
+    return best
+
+
+def sim_bot_pick(name):
+    """Choose and commit one bot pick."""
+    best = sim_pick_choice(name)
+    if best is None:
+        return None
+    add_manual_pick(name, best, mine=False)
+    return best
+
+
+def sim_autopick(name):
+    """Clock expired -- take the top recommendation, exactly like the platform would."""
+    c, L = CTX[name], CTX[name]["league"]
+    picks = manual_picks(name)
+    taken = {key(p["name"], p["position"]) for p in picks}
+    by_key = {key(r["name"], r["position"]): r for r in c["rows"]}
+    mine = [by_key[key(p["name"], p["position"])] for i, p in enumerate(picks, 1)
+            if slot_of_pick(i, L.teams) == SIM[name]["slot"]
+            and key(p["name"], p["position"]) in by_key]
+    on_clock = len(picks) + 1
+    my_picks = snake_picks_for_slot(SIM[name]["slot"], L.teams, SIM[name]["rounds"])
+    later = [p for p in my_picks if p > on_clock]
+    recs = draft_mod.recommend(c["rows"], L, taken, mine, limit=1,
+                               next_pick=on_clock,
+                               following_pick=later[0] if later else None)
+    if recs:
+        add_manual_pick(name, recs[0], mine=True)
+        SIM[name]["autopicked"].append(recs[0]["name"])
+        return recs[0]
+    return None
+
+
+def sim_advance(name):
+    """Move the practice draft forward. Called on a timer; cheap when idle."""
+    s = SIM.get(name)
+    if not s or s["done"]:
+        return
+    L = CTX[name]["league"]
+    picks = manual_picks(name)
+    if len(picks) >= s["total"]:
+        s["done"], s["deadline"] = True, None
+        return
+
+    on_clock = len(picks) + 1
+    now = time.time()
+    if slot_of_pick(on_clock, L.teams) == s["slot"]:
+        if s["deadline"] is None:              # your turn just came around
+            s["deadline"] = now + s["clock"]
+        elif now >= s["deadline"]:
+            sim_autopick(name)
+            s["deadline"] = None
+            s["next_bot"] = now + s["bot_secs"]
+        return
+
+    s["deadline"] = None
+
+    if not s["transcribe"]:
+        if now >= s["next_bot"]:
+            sim_bot_pick(name)
+            s["next_bot"] = now + s["bot_secs"]
+        return
+
+    # Transcribe drill: the room picks, and YOU have to get it into the board
+    # before the next one lands -- which is the actual job on draft day in a
+    # league with no live feed.
+    if s["pending"] is None:
+        if now >= s["next_bot"]:
+            r = sim_pick_choice(name)
+            if r is None:
+                s["done"] = True
+                return
+            s["pending"] = {"name": r["name"], "position": r["position"],
+                            "slot": slot_of_pick(on_clock, L.teams)}
+            s["entry_deadline"] = now + s["entry_secs"]
+    elif now >= s["entry_deadline"]:
+        row = next((r for r in CTX[name]["rows"]
+                    if r["name"] == s["pending"]["name"]), None)
+        if row:
+            add_manual_pick(name, row, mine=False)
+        s["missed"].append(s["pending"]["name"])
+        s["pending"] = None
+        s["next_bot"] = now + s["bot_secs"]
+
+
+def sim_owns(name, mine_flag):
+    """In a practice draft the snake decides whose pick it is, not the checkbox."""
+    s = SIM.get(name)
+    if not s:
+        return mine_flag
+    on_clock = len(manual_picks(name)) + 1
+    return slot_of_pick(on_clock, CTX[name]["league"].teams) == s["slot"]
+
+
+def sim_accept(name, row):
+    """Gate a manual entry during a practice draft. Returns (ok, error).
+
+    In the transcribe drill the room has already made its pick, so entering
+    someone else is the mistake worth catching -- on the day it would silently
+    corrupt the board and every recommendation after it.
+    """
+    s = SIM.get(name)
+    if not s or not s["transcribe"] or s["pending"] is None:
+        return True, None
+    if row["name"] == s["pending"]["name"]:
+        s["typed"].append(row["name"])
+        s["pending"] = None
+        s["next_bot"] = time.time() + s["bot_secs"]
+        return True, None
+    return False, (f"not the pick — team {s['pending']['slot']} took "
+                   f"{s['pending']['name']}, you typed {row['name']}")
+
+
+def sim_loop():
+    while True:
+        time.sleep(0.4)
+        try:
+            with LOCK:
+                for nm in list(SIM):
+                    sim_advance(nm)
+        except Exception as e:                 # never let the sim kill the server
+            print(f"  ! sim: {type(e).__name__}: {e}")
+
+
+def sim_state(name):
+    s = SIM.get(name)
+    if not s:
+        return None
+    L = CTX[name]["league"]
+    picks = manual_picks(name)
+    on_clock = len(picks) + 1
+    yours = slot_of_pick(on_clock, L.teams) == s["slot"] and not s["done"]
+    now = time.time()
+    if yours:
+        # The timer thread sets the deadline a fraction of a second after your
+        # turn arrives; show the full clock rather than a blank in that gap.
+        left = max(0, s["deadline"] - now) if s["deadline"] else s["clock"]
+    elif s["pending"]:
+        left = max(0, s["entry_deadline"] - now)
+    else:
+        left = None
+    return {
+        "on": True, "yours": yours, "done": s["done"],
+        "left": round(left) if left is not None else None,
+        "clock": s["clock"], "slot": s["slot"],
+        "round": (on_clock - 1) // L.teams + 1, "rounds": s["rounds"],
+        "pick_no": min(on_clock, s["total"]), "total": s["total"],
+        "on_slot": slot_of_pick(on_clock, L.teams),
+        "autopicked": s["autopicked"],
+        "transcribe": s["transcribe"],
+        "pending": s["pending"],
+        "missed": s["missed"], "typed": len(s["typed"]),
+    }
 
 
 def tier_breaks(rows, position, n=14):
@@ -219,17 +461,28 @@ def state_for(name):
     picks = picks_for(name)
     taken = {key(p["name"], p["position"]) for p in picks if p["name"]}
     by_key = {key(r["name"], r["position"]): r for r in rows}
-    mine = [by_key[key(p["name"], p["position"])] for p in picks
-            if p.get("by") == c["me"] and key(p["name"], p["position"]) in by_key]
+    sim = SIM.get(name)
+    if sim:
+        # The practice draft knows the slot, so ownership is derived from the
+        # snake rather than from whether a checkbox got ticked in a hurry.
+        mine = [by_key[key(p["name"], p["position"])] for i, p in enumerate(picks, 1)
+                if slot_of_pick(i, L.teams) == sim["slot"]
+                and key(p["name"], p["position"]) in by_key]
+    else:
+        mine = [by_key[key(p["name"], p["position"])] for p in picks
+                if p.get("by") == c["me"] and key(p["name"], p["position"]) in by_key]
 
     on_clock = len(picks) + 1
-    slot = c["slot"]
-    my_picks = snake_picks_for_slot(slot, L.teams, c["rounds"]) if slot else []
+    slot = sim["slot"] if sim else c["slot"]
+    rounds = sim["rounds"] if sim else c["rounds"]
+    my_picks = snake_picks_for_slot(slot, L.teams, rounds) if slot else []
     upcoming = [p for p in my_picks if p >= on_clock]
     until = (upcoming[0] - on_clock) if upcoming else None
     gap = (upcoming[1] - upcoming[0]) if len(upcoming) > 1 else L.teams
 
-    recs = draft_mod.recommend(rows, L, taken, mine, limit=60)
+    my_next = on_clock + (until or 0)
+    recs = draft_mod.recommend(rows, L, taken, mine, limit=60,
+                               next_pick=my_next, following_pick=my_next + gap)
     avail = [r for r in rows if key(r["name"], r["position"]) not in taken]
     value = sorted((r for r in avail
                     if r.get("edge") is not None and r["vbd_rank"] <= 170),
@@ -248,7 +501,8 @@ def state_for(name):
         "roster": [{"n": p["name"], "p": p["pos_rank"]} for p in mine],
         "recs": [{"n": r["name"], "p": r["pos_rank"], "g": r["marginal"],
                   "v": r["vorp"], "e": r.get("edge"), "m": r.get("adp_rank"),
-                  "s": r.get("rel_spread", 0)} for r in recs],
+                  "s": r.get("rel_spread", 0), "gp": r.get("gone_pct"),
+                  "pl": r.get("plan")} for r in recs],
         "value": [{"n": r["name"], "p": r["pos_rank"], "e": r["edge"],
                    "m": r["adp_rank"]} for r in value],
         "gone": [{"n": r["name"], "p": r["pos_rank"]} for r in gone],
@@ -259,6 +513,7 @@ def state_for(name):
         "wait": wait_cost(rows, taken, on_clock + (until or 0),
                           on_clock + (until or 0) + gap),
         "run": positional_run(picks),
+        "sim": sim_state(name),
         "ts": time.strftime("%H:%M:%S"),
     }
 
@@ -287,8 +542,26 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .bar{display:inline-block;height:9px;border-radius:2px;background:var(--acc);
 vertical-align:middle;margin-right:7px}
 .pos{color:var(--dim);font-size:12px}
+/* one size for every number in the board; colour carries the meaning, not size */
+td.num{font-size:14px}
+td.num.dim{color:var(--dim)}
+td.num.acc{color:var(--acc);font-weight:700}
+tr.hd td{color:var(--dim);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;
+border-bottom:1px solid var(--line);padding-bottom:6px}
+.legend{color:var(--dim);font-size:12px;margin:-4px 0 9px;white-space:normal;
+line-height:1.4}
+.legend b{color:var(--fg);font-weight:600}
 .pos.RB{color:#86efac}.pos.WR{color:#93c5fd}.pos.TE{color:#fca5a5}.pos.QB{color:#fcd34d}
-.up{color:var(--go)}.dn{color:var(--bad)}
+.up{color:var(--go)}.dn{color:var(--bad)}.warnt{color:var(--warn)}
+.clockme{background:#1b2410;border-color:#3d5220}
+.clock2{background:#241c10;border-color:#513d18}
+.simwait{background:#141a26;border-color:#2b3a52}
+.simdone{background:#101f18;border-color:#1f4a37}
+.big{font-size:34px;font-weight:700;letter-spacing:1px;line-height:1.15}
+.big.hot{color:var(--bad)}
+.cd{color:var(--warn);font-size:14px;margin-top:5px}.cd.hot{color:var(--bad);font-weight:700}
+.rst{color:var(--acc);cursor:pointer;text-decoration:underline;font-size:13px;
+margin-left:8px}
 .need{display:inline-block;background:#2a1f14;color:var(--warn);border-radius:5px;
 padding:2px 8px;margin-right:6px;font-size:13px}
 .gone span,.roster span{display:inline-block;margin:0 10px 5px 0;color:var(--dim)}
@@ -326,13 +599,61 @@ let LEAGUE=new URLSearchParams(location.search).get('league')||'';
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const pos=p=>`<span class="pos ${(p||'').replace(/[0-9]/g,'')}">${esc(p)}</span>`;
 const sg=v=>v==null?'':`<span class="${v>0?'up':v<0?'dn':''}">${v>0?'+':''}${v}</span>`;
+// odds he's taken before you pick again -- the reason the order isn't just by value
+const gone=v=>v==null?'<span class=pos>—</span>'
+ :`<span class="${v>=70?'dn':v>=35?'warnt':'pos'}">${v}%</span>`;
+const fmt=s=>s==null?'—':`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 function tabs(d){
  document.getElementById('tabs').innerHTML=d.leagues.map(n=>
   `<div class="tab ${n===d.league?'on':''}" onclick="pick('${esc(n)}')">${esc(n)}</div>`).join('');
 }
-function pick(n){LEAGUE=n;history.replaceState({},'',`?league=${encodeURIComponent(n)}`);tick();}
+function pick(n){
+ LEAGUE=n;window._last=null;          // don't tick the old league's clock here
+ history.replaceState({},'',`?league=${encodeURIComponent(n)}`);
+ document.getElementById('tabs').innerHTML=
+  Array.from(document.querySelectorAll('#tabs .tab')).map(t=>
+   `<div class="tab ${t.textContent===n?'on':''}" `
+   +`onclick="pick('${esc(t.textContent)}')">${esc(t.textContent)}</div>`).join('');
+ tick();
+}
 function render(d){
- const mx=Math.max(1,...d.recs.map(r=>r.g));
+ // The bar has to be drawn from the SAME number the rows are sorted by, or it
+ // reads as a broken list. `pl` (value now + expected value of your next pick)
+ // is the sort key whenever we know your pick numbers; `g` otherwise.
+ const sv=r=>r.pl!=null?r.pl:r.g;
+ // Scale across the real range, not from zero: the sort key sits in a narrow
+ // band well above zero, so a zero-based bar is visually flat and says nothing.
+ const mn=Math.min(...d.recs.map(sv));
+ const mx=Math.max(1,...d.recs.map(r=>sv(r)-mn));
+ // Built into its own string, not appended to `h` -- `h` is declared further
+ // down, and touching it up here throws a temporal-dead-zone ReferenceError
+ // that tick() swallows, leaving the previous league on screen.
+ const S=d.sim;
+ let simcard='';
+ if(S){
+  if(S.done){
+   simcard=`<div class="card simdone"><b>practice draft complete</b> — ${S.rounds} rounds`
+    +(S.autopicked.length?` · autopicked for you: ${S.autopicked.map(esc).join(', ')}`:'')
+    +(S.transcribe?` · typed ${S.typed}, missed ${S.missed.length}`:'')
+    +` <span class=rst onclick="resetSim()">run it again</span></div>`;
+  } else if(S.pending){
+   simcard=`<div class="card clock2"><div class=lbl>team ${S.pending.slot} is on the clock`
+    +` — type this pick in</div><div class=big>${esc(S.pending.name)}`
+    +` <span class=pos>${esc(S.pending.position)}</span></div>`
+    +`<div class="cd ${S.left<=5?'hot':''}">${S.left==null?'':S.left+'s to enter it'}</div></div>`;
+  } else if(S.yours){
+   simcard=`<div class="card clockme"><div class=lbl>you are on the clock`
+    +` — round ${S.round}, pick ${S.pick_no} of ${S.total}</div>`
+    +`<div class="big ${S.left<=10?'hot':''}">${fmt(S.left)}</div>`
+    +`<div class=pos>pick from the board below, or it autopicks for you</div></div>`;
+  } else {
+   simcard=`<div class="card simwait"><div class=lbl>practice draft — round ${S.round}`
+    +` of ${S.rounds}, pick ${S.pick_no} of ${S.total}</div>`
+    +`<div>team ${S.on_slot} on the clock… <span class=pos>(you are slot ${S.slot})</span>`
+    +` <span class=rst onclick="resetSim()">restart</span></div></div>`;
+  }
+  if(d.reject) simcard+=`<div class="card err">${esc(d.reject)}</div>`;
+ }
  let entry='';
  if(d.manual){
   entry=`<div class="card entry"><div class=lbl>manual entry — no live feed for this league`
@@ -347,6 +668,7 @@ function render(d){
    : d.until==null?`draft not started / slot unknown`
    : `you're up in <span class=clock>${d.until}</span> pick${d.until==1?'':'s'}`;
  h+=` · slot ${d.slot??'?'} · ${d.npicks} picks in · ${esc(d.ts)}</div>`;
+ h+=simcard;
  if(d.run) h+=`<div class="card run"><b>${d.run.pos} run</b> — ${d.run.n} of the last `
    +`${d.run.of} picks. Get ahead of it or wait it out deliberately.</div>`;
  h+=entry;
@@ -368,10 +690,18 @@ function render(d){
     +`<td class=num>${c}</td></tr>`;}
   h+=`</table></div>`;}
 
- h+=`<div class=card><div class=lbl>take now — value to your lineup</div><div class=filters>`;
+ const ordered=d.recs.some(r=>r.pl!=null);
+ h+=`<div class=card><div class=lbl>take now</div>`
+  +`<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
+  +(ordered?` <b>plus what you'd still get at your next pick</b> — so a player`
+    +` who won't last can outrank one worth slightly more who will`:'')
+  +`</div><div class=filters>`;
  for(const f of ['ALL','QB','RB','WR','TE'])
   h+=`<div class="f ${FILTER===f?'on':''}" onclick="setf('${f}')">${f}</div>`;
- h+=`</div><div class=scrollbox><table>`;
+ h+=`</div><div class=scrollbox><table>`
+  +`<tr class=hd><td>player</td><td class=num>lineup</td><td class=num>vorp</td>`
+  +`<td class=num>${ordered?'gone by next pick':''}</td>`
+  +`<td class=num>adp</td><td class=num>edge</td></tr>`;
  const shown=d.recs.filter(r=>FILTER==='ALL'||r.p.replace(/[0-9]/g,'')===FILTER);
  let prevTier=null;
  for(const r of shown){
@@ -381,12 +711,13 @@ function render(d){
   const brk=(FILTER!=='ALL'&&te&&prevTier!==null&&te.tier!==prevTier);
   if(te) prevTier=te.tier;
   h+=`<tr class="${brk?'tierrow':''}"><td style="width:50%">`
-   +`<span class=bar style="width:${Math.round(Math.max(r.g,0)/mx*70)}px"></span>`
+   +`<span class=bar style="width:${Math.round((sv(r)-mn)/mx*70)}px"></span>`
    +`${esc(r.n)} ${pos(r.p)}${r.s>0.2?' <span title="sources disagree" style="color:var(--warn)">◆</span>':''}`
    +`${brk?' <span class=tiertag>TIER '+te.tier+'</span>':''}</td>`
-   +`<td class=num style="color:var(--acc)">+${Math.round(r.g)}</td>`
-   +`<td class="num pos">vorp ${Math.round(r.v)}</td>`
-   +`<td class=num>mkt ${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
+   +`<td class="num acc">+${Math.round(r.g)}</td>`
+   +`<td class="num dim">${Math.round(r.v)}</td>`
+   +`<td class=num>${gone(r.gp)}</td>`
+   +`<td class="num dim">${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
  if(!shown.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;
  h+=`</table></div></div>`;
  h+=`<div class=card><div class=lbl>value — falling past their price</div><table>`;
@@ -425,21 +756,60 @@ async function undoPick(){
  if(!d.error){POOL=d.pool||[];window._last=d;tabs(d);
    document.getElementById('app').innerHTML=render(d);}
 }
+async function resetSim(){
+ const d=await (await fetch(`/sim/reset?league=${encodeURIComponent(LEAGUE)}`)).json();
+ if(!d.error){POOL=d.pool||[];window._last=d;tabs(d);
+   document.getElementById('app').innerHTML=render(d);}
+}
+// The clock ticks locally between polls so it counts down smoothly; every poll
+// re-syncs it to the server, which is the authority on when time is up.
+setInterval(()=>{
+ const d=window._last; if(!d||!d.sim||d.sim.left==null||d.sim.done) return;
+ d.sim.left=Math.max(0,d.sim.left-1);
+ const el=document.querySelector('.big,.cd'); if(!el) return;
+ if(d.sim.pending){el.textContent=d.sim.left+'s to enter it';
+   el.className='cd'+(d.sim.left<=5?' hot':'');}
+ else if(d.sim.yours){el.textContent=fmt(d.sim.left);
+   el.className='big'+(d.sim.left<=10?' hot':'');}
+},1000);
+let SEQ=0;
 async function tick(){
+ clearTimeout(window._t);          // cancel any pending run before starting
+ const my=++SEQ;
  try{
   const d=await (await fetch('/state?league='+encodeURIComponent(LEAGUE))).json();
+  // A slower response for the league you just switched AWAY from must not
+  // overwrite the one you asked for -- it would snap the board back.
+  if(my!==SEQ) return;
   if(d.error){document.getElementById('app').innerHTML=
      `<div class="card err">${esc(d.error)}</div>`;}
   else{
     LEAGUE=d.league;POOL=d.pool||[];window._last=d;tabs(d);
     const q=document.getElementById('q');
-    const keep=q?{v:q.value,f:document.activeElement===q}:null;
+    // The poll rebuilds this input under you. Carry the caret and selection
+    // across too, not just the text -- without it, typing fast against a clock
+    // loses your cursor every refresh.
+    const keep=q?{v:q.value,f:document.activeElement===q,
+                  s:q.selectionStart,e:q.selectionEnd}:null;
     document.getElementById('app').innerHTML=render(d);
     if(keep){const q2=document.getElementById('q');
-             if(q2){q2.value=keep.v;if(keep.f){q2.focus();hits();}}}
+             if(q2){q2.value=keep.v;
+                    if(keep.f){q2.focus();
+                      try{q2.setSelectionRange(keep.s,keep.e);}catch(_){}
+                      hits();}}}
   }
- }catch(e){}
- clearTimeout(window._t);window._t=setTimeout(tick,5000);
+ }catch(e){
+  // Never fail silently: a render bug used to leave the last league frozen on
+  // screen with no clue why.
+  console.error('tick',e);
+  document.getElementById('app').innerHTML=
+    `<div class="card err">render failed: ${esc(e&&e.message||e)}</div>`;
+ }
+ if(my!==SEQ) return;              // a newer tick owns the schedule now
+ // A practice draft moves on a clock, so it needs a much tighter poll than a
+ // draft board that is just watching a feed.
+ const fast=window._last&&window._last.sim&&!window._last.sim.done;
+ clearTimeout(window._t);window._t=setTimeout(tick,fast?1200:5000);
 }
 tick();
 </script></body></html>"""
@@ -449,7 +819,28 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _json(self, body: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        if self.path.startswith("/sim/reset"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (q.get("league") or [""])[0]
+            try:
+                with LOCK:
+                    s = SIM[name]
+                    sim_start(name, s["slot"], s["rounds"], s["clock"],
+                              s["bot_secs"], s["transcribe"], s["entry_secs"])
+                    body = json.dumps(state_for(name)).encode()
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}",
+                                   "leagues": list(CTX), "league": name}).encode()
+            self._json(body)
+            return
         if self.path.startswith("/pick") or self.path.startswith("/undo"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = (q.get("league") or [""])[0]
@@ -463,7 +854,13 @@ class Handler(BaseHTTPRequestHandler):
                         row = next((r for r in CTX[name]["rows"]
                                     if r["name"] == who), None)
                         if row:
-                            add_manual_pick(name, row, mine)
+                            ok, err = sim_accept(name, row)
+                            if not ok:
+                                body = json.dumps(
+                                    {**state_for(name), "reject": err}).encode()
+                                self._json(body)
+                                return
+                            add_manual_pick(name, row, sim_owns(name, mine))
                     body = json.dumps(state_for(name)).encode()
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}",
@@ -499,6 +896,19 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8777)
+    ap.add_argument("--sim", metavar="LEAGUE",
+                    help="run a practice draft for this league instead of a live one")
+    ap.add_argument("--slot", type=int, default=5, help="your draft slot (sim)")
+    ap.add_argument("--rounds", type=int, default=3, help="rounds to simulate")
+    ap.add_argument("--clock", type=int, default=90,
+                    help="seconds on your clock (sim)")
+    ap.add_argument("--bot-secs", type=float, default=6.0,
+                    help="seconds each bot takes to pick (sim)")
+    ap.add_argument("--transcribe", action="store_true",
+                    help="drill the real draft-day job: type in every pick the "
+                         "room makes, against a clock")
+    ap.add_argument("--entry-secs", type=int, default=20,
+                    help="seconds to type in an opponent's pick (--transcribe)")
     args = ap.parse_args()
 
     cfgs = {c["name"]: c for c in
@@ -508,6 +918,24 @@ def main():
     prepare(leagues, cfgs, fetch())
     for nm, err in errors:
         print(f"  skip {nm}: {err[:60]}")
+
+    if args.sim:
+        if args.sim not in CTX:
+            print(f"\n  no league '{args.sim}'. have: {', '.join(CTX)}")
+            return
+        if not 1 <= args.slot <= CTX[args.sim]["league"].teams:
+            print(f"\n  --slot must be 1..{CTX[args.sim]['league'].teams}")
+            return
+        sim_start(args.sim, args.slot, args.rounds, args.clock, args.bot_secs,
+                  args.transcribe, args.entry_secs)
+        threading.Thread(target=sim_loop, daemon=True).start()
+        print(f"\n  PRACTICE DRAFT — {args.sim}: {args.rounds} rounds, "
+              f"you are slot {args.slot} of {CTX[args.sim]['league'].teams}, "
+              f"{args.clock}s clock"
+              + (f", transcribe drill ({args.entry_secs}s per pick)"
+                 if args.transcribe else ""))
+        print("  picks go to data/manual_picks/_sim_*.json — your real draft "
+              "file is untouched")
 
     ip = "localhost"
     try:

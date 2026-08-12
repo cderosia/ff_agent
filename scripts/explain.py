@@ -45,7 +45,12 @@ def main():
     lines = p.get("source_lines") or {}
     stats = sorted(p["stats"].items(), key=lambda kv: -abs(kv[1]))
     for stat, val in stats:
-        per = "  ".join(f"{s}={lines[s].get(stat,0):.1f}" for s in sorted(lines))
+        # "—" means the source doesn't publish that stat at all, which is not the
+        # same as projecting zero -- the blend averages only over sources that
+        # report it, so the distinction matters for reading the number.
+        per = "  ".join(
+            f"{s}=" + (f"{lines[s][stat]:.1f}" if stat in lines[s] else "—")
+            for s in sorted(lines))
         print(f"     {stat:12} {val:8.1f}   ({per})")
 
     leagues, _ = load_all()

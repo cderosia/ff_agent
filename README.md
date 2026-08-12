@@ -12,7 +12,14 @@ writes to any platform. Every output is a recommendation I act on myself.
 - **Draft assistant** — a value-based-drafting (VBD) board computed from each
   league's real scoring coefficients and starter counts, rather than generic
   public rankings. Flags roster gaps, best available, and best value as picks
-  come off the board.
+  come off the board. During a live draft it ranks by marginal lineup value plus
+  the expected value of your *next* pick, so the cost of waiting on a position is
+  priced into the order rather than left for you to eyeball.
+- **Practice drafts** — rehearse draft day against bots that draft off jittered
+  ADP, on a clock, through the same board and the same manual-entry path used on
+  the day. `--transcribe` drills the part that actually bites in a league with no
+  live pick feed: getting every pick the room makes into the board before the
+  next one lands.
 - **Weekly reports** — lineup calls, waiver targets with suggested FAAB, and
   trade angles, each with the reasoning shown.
 
@@ -41,6 +48,12 @@ rebuilt on value-over-replacement instead.
 - [nflverse](https://github.com/nflverse/nflverse-data) — historical player stats
 - [Fantasy Football Calculator](https://fantasyfootballcalculator.com/) — ADP
 - Sleeper, ESPN, and Yahoo APIs — league settings and rosters
+- Projections are blended from **three** sources — ESPN (in-house), Sleeper
+  (Rotowire), and [FFToday](https://www.fftoday.com/) — averaged at the stat
+  level so the blend can still be rescored under any league's rules. Three is a
+  deliberate cap: two sources can tell you *that* they disagree but not who is
+  right, and past three the marginal source moves the top-100 board by about a
+  rank. A source that fails to load is skipped rather than fatal.
 
 ## Setup
 
