@@ -573,6 +573,7 @@ background:#0c0f14;color:var(--fg);font:15px ui-monospace,Menlo,monospace}
 .hit{padding:6px 11px;border-radius:6px;background:#1d2532;border:1px solid var(--line);
 cursor:pointer;font-size:13px}
 .hit:hover{background:#26304180}
+.hit.sel{background:#2c3a52;border-color:var(--go)}
 .hit b{color:var(--go)}
 .mineflag{margin-top:9px;color:var(--dim);font-size:13px;cursor:pointer;user-select:none}
 .mineflag input{margin-right:7px;transform:scale(1.2)}
@@ -597,6 +598,11 @@ cursor:pointer;font-size:12px;color:var(--dim)}
 <script>
 let LEAGUE=new URLSearchParams(location.search).get('league')||'';
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let HITS=[],SEL=0;
+// Mirrors ff.names.normalize on the client: strip accents and punctuation so
+// the query and the candidate compare on letters alone.
+const nk=s=>String(s??'').toLowerCase().normalize('NFD')
+  .replace(/[\u0300-\u036f]/g,'').replace(/[^a-z ]/g,'').replace(/\s+/g,' ').trim();
 const pos=p=>`<span class="pos ${(p||'').replace(/[0-9]/g,'')}">${esc(p)}</span>`;
 const sg=v=>v==null?'':`<span class="${v>0?'up':v<0?'dn':''}">${v>0?'+':''}${v}</span>`;
 // odds he's taken before you pick again -- the reason the order isn't just by value
@@ -659,7 +665,7 @@ function render(d){
   entry=`<div class="card entry"><div class=lbl>manual entry — no live feed for this league`
    +`<span class=undo onclick="undoPick()">undo last</span></div>`
    +`<input id=q placeholder="type a name, then click to mark drafted…" `
-   +`autocomplete=off oninput="hits()" onkeydown="if(event.key==='Enter')first()">`
+   +`autocomplete=off oninput="SEL=0;hits()" onkeydown="navHits(event)">`
    +`<div class=hits id=hits></div>`
    +`<label class=mineflag><input type=checkbox id=mine> this pick is MINE</label></div>`;
  }
@@ -734,17 +740,44 @@ function setf(p){FILTER=p;const d=window._last;if(d)document.getElementById('app
 function hits(){
  const q=(document.getElementById('q').value||'').toLowerCase().trim();
  const box=document.getElementById('hits');
- if(q.length<2){box.innerHTML='';return;}
- const m=POOL.filter(p=>p.n.toLowerCase().includes(q)).slice(0,8);
- box.innerHTML=m.map(p=>`<div class=hit onclick="take('${p.n.replace(/'/g,"\\'")}')">`
+ if(!q){box.innerHTML='';HITS=[];return;}
+ // Punctuation-blind: "jamarr" has to find "Ja'Marr Chase". Under a 30s clock
+ // you cannot be made to type an apostrophe correctly.
+ const nq=nk(q);
+ const scored=[];
+ for(const p of POOL){
+  const n=nk(p.n), last=n.split(' ').slice(-1)[0];
+  let r=-1;
+  if(n.startsWith(nq))       r=0;   // full-name prefix
+  else if(last.startsWith(nq)) r=1; // last-name prefix -- how you actually type
+  else if(n.includes(nq))    r=2;   // anywhere
+  if(r>=0) scored.push([r,p]);
+ }
+ scored.sort((a,b)=>a[0]-b[0]);
+ HITS=scored.slice(0,8).map(x=>x[1]);
+ if(SEL>=HITS.length) SEL=0;
+ // Index into HITS rather than interpolating the name into an onclick string:
+ // any name containing a quote used to emit broken JS and the click died.
+ box.innerHTML=HITS.map((p,i)=>`<div class="hit${i===SEL?' sel':''}" onclick="take(${i})">`
    +`${esc(p.n)} ${pos(p.p)}</div>`).join('')||'<span style="color:var(--dim)">no match</span>';
 }
-function first(){
- const h=document.querySelector('.hit'); if(h) h.click();
+function navHits(e){
+ if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+  e.preventDefault();
+  if(!HITS.length) return;
+  SEL=(SEL+(e.key==='ArrowDown'?1:HITS.length-1))%HITS.length;
+  hits();
+ } else if(e.key==='Enter'){ e.preventDefault(); first(); }
 }
-async function take(n){
+function first(){
+ if(HITS.length) take(SEL);
+}
+async function take(i){
+ const p=HITS[i]; if(!p) return;
+ const n=p.n;
  const mine=document.getElementById('mine').checked?1:0;
  document.getElementById('q').value='';document.getElementById('hits').innerHTML='';
+ HITS=[];SEL=0;
  const d=await (await fetch(`/pick?league=${encodeURIComponent(LEAGUE)}`
    +`&name=${encodeURIComponent(n)}&mine=${mine}`)).json();
  if(!d.error){POOL=d.pool||[];window._last=d;tabs(d);
