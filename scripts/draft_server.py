@@ -710,7 +710,8 @@ function render(d){
  for(const f of ['ALL','QB','RB','WR','TE'])
   h+=`<div class="f ${FILTER===f?'on':''}" onclick="setf('${f}')">${f}</div>`;
  h+=`</div><div class=scrollbox><table>`
-  +`<tr class=hd><td>player</td><td class=num>lineup</td><td class=num>vorp</td>`
+  +`<tr class=hd><td>player</td><td class=num>lineup</td>`
+  +`<td class=num title="expected season points: starts x value over a streamer">season</td>`
   +`<td class=num>${ordered?'gone by next pick':''}</td>`
   +`<td class=num>adp</td><td class=num>edge</td></tr>`;
  const shown=d.recs.filter(r=>FILTER==='ALL'||r.p.replace(/[0-9]/g,'')===FILTER);
