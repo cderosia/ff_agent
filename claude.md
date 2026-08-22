@@ -2,130 +2,135 @@
 
 ## What this project is
 
-A personal fantasy football decision-support system for the 2025 season, used across
-**multiple leagues** (ESPN / Yahoo / Sleeper, different scoring + roster settings). Treat
-this season as a **pilot** to test the core thesis and the architecture; expect to throw
-things away and rebuild for next year.
+A personal fantasy football decision-support system for the **2026 season**, used across
+**five leagues** on Sleeper, ESPN and Yahoo, each with different scoring and roster
+settings. It reads those leagues, computes a draft board tuned to each one's exact rules,
+and produces weekly lineup / waiver / trade recommendations.
 
-Four intended assistants, in priority order:
+**Read-only by design.** It never sets a lineup, submits a claim, or writes to any
+platform. Every output is a recommendation Carter acts on himself. Keep it that way:
+Sleeper's API is read-only anyway, and ESPN's write endpoints are undocumented and
+ToS-grey.
 
-1. **Draft assistant** (BUILD FIRST — season starts in ~1 month) — produce a bias-adjusted
-   draft board per league.
-2. **Lineup assistant** — set weekly lineups given a roster.
-3. **Trade assistant** — evaluate/craft trades to fill roster holes.
-4. **Waiver/free-agency assistant** — monitor waivers and surface pickups.
+## Read this before changing scoring
 
-All four should share one underlying player-value engine, so build that engine once.
+Two documents carry the reasoning and are worth more than this file:
 
-## The core thesis (what makes this different)
+- **`ANALYSIS.md`** — the research. Most importantly it records a hypothesis that was
+  **tested and rejected**: modelling each platform's positional "bias" from historical ADP
+  vs. actual finish. The proposed metric returned a perfect, sign-consistent signal, and a
+  Monte Carlo null showed it produced that same signal on data containing no bias at all.
+  It was measuring regression to the mean and a pool-size mismatch. **Do not rebuild it.**
+- **`README.md`** — what the tool does, from the user's side.
 
-Do **not** try to out-predict player performance from raw stats — ESPN/Yahoo/Sleeper/DK
-already do this with far more data and staff. We will lose that game.
+The surviving architecture is conventional **value-based drafting** off blended
+projections, plus roster-aware live draft logic. That is the reliable core.
 
-Instead, **predict the bias of the predictors.** The hypothesis: platforms and their
-userbases systematically mis-value certain player types (e.g. "ESPN over-inflates RB
-preseason expectations, so RBs go too early in ESPN drafts and underperform their draft
-slot"). If a bias is **real and repeats year over year**, it's an exploitable edge that
-survives even when it's widely known, because it's driven by defaults and human psychology,
-not a fixable model error. This is analogous to finding closing-line value in betting: you
-don't beat the market by predicting the dice, you beat it by spotting where the line is
-mispriced.
+## Ground truth: run the bakeoff
 
-### Honest assessment of the thesis (from planning session)
+`scripts/bakeoff.py` is the only real validation this system has. Each strategy drafts
+from every slot, three seeds, scored as weekly starting-lineup points with byes applied.
 
-- **It's a better bet than out-projecting the platforms**, because it competes where a solo
-  builder can actually win (relative mispricing in *your* leagues) instead of where you
-  can't (absolute projection accuracy).
-- **But it's higher-variance / more likely to produce a null result.** The bias must be
-  large enough to matter and consistent across years, not small-sample noise. Small buckets
-  over 3–5 years is the #1 failure mode — be disciplined about sample size and
-  out-of-sample testing.
-- **Markets partly self-correct.** Big obvious biases get faded by sharp drafters, shrinking
-  them. The exploitable biases are likely the subtle structural ones.
-- **Recommended framing: layered, not all-or-nothing.** Use conventional **value-based
-  drafting (VBD / value over replacement)** off decent projections as the reliable floor,
-  and use the bias model as a **tiebreaker / edge-finder** on top. If the bias signal is
-  weak, you still have a solid draft assistant. If it's strong, you have an edge no one in
-  your leagues has.
+    python3 scripts/bakeoff.py [league ...]
 
-## Data-sourcing reality (discovered this session — READ THIS, saves you dead ends)
+Current standing (weekly starting-lineup points vs. following ADP):
 
-The hard part is historical data. Key findings:
+    league            board    caps_adp    vorp
+    719              +90.8       +41.8    +31.5
+    freinds-keeper   +73.6       +24.7   -258.8
+    family          +123.6       +68.5    -63.4
+    friends         +113.8       +76.3   -143.0
+    work            +121.1       +64.6   -181.0
 
-- **Nobody warehoused historical *preseason projections*** from ESPN/Yahoo/Sleeper. Scrapers
-  (e.g. `ffanalytics`) only work in real time. So "learn each platform's projection bias"
-  needs a **proxy**.
-- **The workable proxy is historical ADP (Average Draft Position) by platform.** Where people
-  draft on a platform is downstream of that platform's default rankings + userbase bias, so
-  **per-platform historical ADP vs. actual end-of-season positional finish** is a solid
-  stand-in for "platform X over/undervalues Y."
-- **ADP source:** FantasyFootballCalculator public API is the canonical free archive:
-  `https://fantasyfootballcalculator.com/api/v1/adp/{ppr|standard|half-ppr|2qb|dynasty}?teams=12&year=YYYY&position=all`
-  Returns JSON: `players[]` with `name, position, team, adp, adp_formatted, times_drafted`.
-  NOTE: FFC ADP is aggregated across its own userbase, not split by ESPN/Yahoo/Sleeper.
-  True per-platform ADP (esp. Sleeper) is harder — investigate Sleeper's API and paid
-  sources if per-platform split proves essential. For a v1, FFC's blended ADP is enough to
-  test whether *any* positional/tier bias exists.
-- **Actuals (season fantasy points / positional finish):** very easy.
-  - `nfl_data_py` / `nflreadr` (nflverse) — cleanest, goes back decades.
-  - Or fantasydatapros yearly CSVs: `https://raw.githubusercontent.com/fantasydatapros/data/master/yearly/{year}.csv`
-    (has FantasyPoints, standard scoring; columns include Player, Tm, Pos, receiving/rushing/passing).
-  - `hvpkod/NFL-Data` (`https://raw.githubusercontent.com/hvpkod/NFL-Data/main/NFL-data-Players/{year}/{week}/{POS}.csv`)
-    is **weekly** actuals+projections from Fantasy.NFL.com back to 2015 — useful later for
-    lineup/waiver work, NOT for preseason draft bias.
-- **Why this was built in Claude Code, not the desktop sandbox:** the desktop sandbox has no
-  direct network egress (pip/pypi and direct HTTP to these hosts are blocked); only an
-  in-context web-fetch tool worked, which can't feed pandas. Claude Code on the local
-  machine has real network + package installs, so it's the right tool.
+**Run it after any scoring change.** Two things it already taught us: roughly half the
+board's edge is just respecting roster-construction limits, and ranking by raw VORP —
+which this repo shipped with until it was replaced — is *worse than blindly following ADP*
+in four of five leagues.
 
-## Recommended architecture (v1)
+**Its caveat is not a formality:** rosters are scored with the same projections the board
+optimises, so it measures roster *construction*, not whether the projections are any good.
+Beating ADP there is not evidence of beating your league.
 
-```
-data/                      # raw + cached pulls (gitignored raw, commit small processed CSVs)
-  adp/ffc_{year}_{format}.csv
-  actuals/season_{year}.csv
-src/
-  ingest_adp.py            # pull FFC ADP by year/format -> tidy df
-  ingest_actuals.py        # pull nflverse/fantasydatapros actuals -> tidy df (season pts + positional finish)
-  bias_model.py            # join ADP<->actuals by normalized name+pos+year;
-                           #   compute drift = actual_positional_rank - adp_positional_rank;
-                           #   bucket by position x draft-tier (rounds 1-2/3-5/6-10/11+);
-                           #   aggregate mean drift + year-by-year sign consistency
-  vbd.py                   # value-based drafting: replacement levels per league settings
-  board.py                 # apply bias correction to this year's live ADP -> adjusted board
-leagues/
-  league_{name}.yaml       # platform, scoring (ppr/half/std), roster slots, team count
-notebooks/                 # exploration
-```
+## Layout
 
-Player-name normalization is the join's biggest footgun (Jr./III, D.J. vs DJ, team
-abbreviations). Build one shared normalizer and reuse it everywhere.
+    src/ff/
+      names.py         one name normalizer for every join. 98.1% match vs nflverse.
+      stats.py         canonical stat vocabulary + each platform's dialect
+      leagues.py       pull real league settings into one shape
+      projections.py   blended per-stat projections (ESPN + Sleeper + FFToday)
+      adp.py           market prices, per-platform where available
+      vbd.py           replacement levels from simulated starter demand; rosterable depth
+      board.py         static board (vorp, edge) + live_ranks() for remaining supply
+      draft.py         live draft state, marginal lineup value, roster_max, recommend()
+      starts.py        expected starts: byes, injury rates, snap share
+      why.py           one or two sentences on why a pick is the pick
+      lineup.py        weekly projections, availability, lineup optimiser
+      weekly.py        usage trends, free agents, waiver targets
+      trades.py        trade search and evaluation
+      keepers.py       keeper valuation
+      notify.py        email delivery
+    scripts/
+      draft_server.py  DRAFT DAY. localhost:8777, all leagues behind a tab strip.
+      bakeoff.py       strategy validation (see above)
+      injury_rates.py  measures MISS_RATE from nflverse
+      build_boards.py  writes boards/*.md
+      explain.py       trace one player through every step of the ranking
+      weekly_report.py / send_weekly.py / keepers.py / draft.py / yahoo_auth.py
+    leagues/leagues.yaml   gitignored — league IDs and manual settings
+    data/raw/              gitignored — cached pulls
 
-## Validation plan (do this BEFORE trusting the model)
+## How the board ranks, and where it stops working
 
-1. Pull ADP + actuals for **at least 5 seasons** (e.g. 2019–2024).
-2. For each position × draft-tier bucket, compute mean drift **per year**.
-3. **The test that matters: is the sign of the drift consistent across years?** A bias that
-   flips sign year to year is noise. A bias that's the same direction in 4–5 of 5 years, with
-   meaningful magnitude (e.g. early-round RBs finish ~1+ tier worse than ADP), is a real edge.
-4. Out-of-sample check: fit correction on years 1..n-1, test on year n.
-5. Only fold surviving biases into the board; leave the rest to VBD.
+Rounds 1-6, ranking is `marginal lineup value + expected value of your next pick`. Both
+are real numbers driven by lineup maths and ADP survival. Trust it here.
 
-## Immediate next steps
+**From about round 7 the lineup maths flatlines.** Once your starters are full, a bench
+player adds exactly 0 starting-lineup points *by definition*, so `marginal` and `plan` are
+0.0 for the entire board. This is structural, not a bug, and no replacement level fixes it
+(dynamic replacement was tried; it doesn't). Late ordering is instead carried by:
 
-1. Scaffold repo (structure above), set up venv, `pip install nfl_data_py pandas requests pyyaml`.
-2. Write `ingest_adp.py` (FFC) and `ingest_actuals.py` (nflverse); cache to `data/`.
-3. Write `bias_model.py` and **run the validation plan** — this decides whether the whole
-   thesis holds. Report per-bucket mean drift + year-by-year sign consistency.
-4. If signal is real: build `vbd.py` + `board.py`, add one `league_*.yaml`, generate a draft
-   board. If signal is weak: ship the VBD board alone and treat bias as a stretch goal.
-5. Later: lineup / trade / waiver assistants on top of the shared value engine.
+- `draft.roster_max` — you start one TE, so a third is never the pick. This is the backstop
+  that stops the board recommending nine tight ends, which it provably did.
+- `starts.bench_value` — expected starts x value over a **waiver streamer**, floored at
+  zero. The floor matters: without it, covering more weeks makes a bad player rank *worse*,
+  so the board preferred backups who shared your bye week.
 
-## Open questions for Carter
+Late-round ordering leans on `starts.MISS_RATE`, measured over 2018-2025 by
+`scripts/injury_rates.py`. Treat late rounds as a shortlist, not an instruction.
 
-I will answer these tomorrow
+## Gotchas that have already cost time
 
-- Which specific leagues (platform + scoring + team count + roster slots) this season?
-- Is per-platform ADP split (ESPN vs Yahoo vs Sleeper) essential to you, or is blended FFC
-  ADP acceptable for the pilot? (Blended is much easier; per-platform may need paid data.)
-- Draft dates — how much runway before the first draft?
+- **Team codes disagree.** Projection feeds say `LAR`/`JAC`, nflverse says `LA`/`JAX`.
+  Unmapped, 29 players silently looked as though they never had a bye. Use
+  `starts.TEAM_ALIASES` / `starts.bye_for()`, never a bare dict lookup.
+- **This Python has no SSL roots.** `urllib` fails with CERTIFICATE_VERIFY_FAILED; use
+  `requests` (it carries certifi). Everything in `src/ff` already does.
+- **`draft_server.py` embeds its whole UI in one Python string.** Backslashes are consumed
+  by Python before the browser sees them — `\s` and `̀` both need doubling. A JS
+  string interpolated into an `onclick` attribute broke every name with an apostrophe.
+- **Names are the join's biggest footgun.** One normalizer, `ff.names`. Do not write a second.
+- **Yahoo needs manual API approval**, not just OAuth. Self-serve apps get
+  `invalid_scope` / `additional_authorization_required`.
+- **FFToday 403s intermittently.** A failing projection source is skipped, not fatal.
+
+## Working agreements
+
+- **Verify, don't assert.** Every claim about behaviour in this repo should come from
+  running something. Several "improvements" this codebase has shipped were later shown by
+  bakeoff to be actively harmful.
+- **State assumptions as assumptions.** `MISS_RATE` sat as invented constants until it was
+  measured, and every one was far too low. If a number is a guess, say so at its
+  definition.
+- **Say what didn't work.** Commit messages here record failed approaches (dynamic
+  replacement not fixing the flatline, the two biased ways of sampling injury rates)
+  because that is what stops them being retried.
+
+## Current state
+
+Five leagues configured; all drafts for 2026 are done. The `work` league's pick file is
+partially recorded (manual entry during a live Yahoo draft) and needs reconciling once the
+Yahoo API key lands.
+
+Next up, in Carter's priority order: **week-to-week in-season logic** (lineups, waivers,
+trades on the shared value engine). A guillotine/elimination league variant was scoped and
+deliberately dropped — that draft has passed.
