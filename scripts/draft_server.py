@@ -652,7 +652,7 @@ let HITS=[],SEL=0;
 // Mirrors ff.names.normalize on the client: strip accents and punctuation so
 // the query and the candidate compare on letters alone.
 const nk=s=>String(s??'').toLowerCase().normalize('NFD')
-  .replace(/[\u0300-\u036f]/g,'').replace(/[^a-z ]/g,'').replace(/\s+/g,' ').trim();
+  .replace(/[\\u0300-\\u036f]/g,'').replace(/[^a-z ]/g,'').replace(/\\s+/g,' ').trim();
 const pos=p=>`<span class="pos ${(p||'').replace(/[0-9]/g,'')}">${esc(p)}</span>`;
 const sg=v=>v==null?'':`<span class="${v>0?'up':v<0?'dn':''}">${v>0?'+':''}${v}</span>`;
 // odds he's taken before you pick again -- the reason the order isn't just by value
