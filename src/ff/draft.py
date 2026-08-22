@@ -21,10 +21,12 @@ work out who survives.
 """
 from __future__ import annotations
 
+import collections
 import math
 
 import requests
 
+from . import vbd
 from .names import key
 from .stats import SLOT_ELIGIBILITY
 
@@ -112,6 +114,63 @@ def lineup_value(players: list[dict], league, replacement: dict) -> float:
     return total
 
 
+def roster_max(league) -> dict:
+    """Most of each position worth carrying on one roster.
+
+    From roughly round 6 on, every available player sits at or below
+    replacement, so `marginal` and `plan` are 0.0 for the entire board and the
+    ranking falls through to a tiebreak. Any tiebreak that slightly favours one
+    position then picks that position every remaining round -- which is how a
+    board recommends nine tight ends. Roster construction is the backstop: you
+    start one TE, so a third is never the pick no matter what the maths says.
+    """
+    dedicated, flex = {}, set()
+    for slot, cnt in league.starters.items():
+        elig = SLOT_ELIGIBILITY.get(slot, {slot})
+        if len(elig) == 1:
+            dedicated[next(iter(elig))] = dedicated.get(next(iter(elig)), 0) + cnt
+        else:
+            flex |= elig
+    out = {}
+    for pos in ("QB", "RB", "WR", "TE"):
+        base = dedicated.get(pos, 0)
+        # Only RB/WR realistically absorb flex slots and injury depth.
+        if pos in ("RB", "WR"):
+            out[pos] = base + (1 if pos in flex else 0) + 2
+        else:
+            out[pos] = base + 1
+    return out
+
+
+def own_gap(player: dict, league, roster: list[dict], replacement: dict) -> float:
+    """Points versus the man you'd actually bench to play him.
+
+    `lineup_value` can only ever return a gain of >= 0, so every player who
+    doesn't crack your lineup ties at exactly 0 and the ordering falls through
+    to league-wide VORP. That badly over-rates a 3rd TE: TE has a low
+    replacement level, so TE13 shows positive VORP while the WR who is one
+    injury from your flex shows negative -- even when you already roster TE2.
+
+    This measures the gap against YOUR incumbent at the slot he'd compete for,
+    so it stays negative for the 3rd TE and ranks bench picks by how close they
+    are to actually starting for you.
+    """
+    filled = _assign(roster, league)
+    best = None
+    for slot, count in league.starters.items():
+        elig = SLOT_ELIGIBILITY.get(slot, {slot})
+        if player["position"] not in elig:
+            continue
+        got = filled.get(slot, [])
+        if len(got) < count:
+            base = max((replacement.get(p, 0.0) for p in elig), default=0.0)
+        else:
+            base = min(p["points"] for p in got)   # the man he'd displace
+        gap = player["points"] - base
+        best = gap if best is None else max(best, gap)
+    return best if best is not None else player["vorp"]
+
+
 def survival(adp: float | None, sd: float | None, pick: int) -> float:
     """P(this player is still on the board when pick `pick` comes around).
 
@@ -136,7 +195,7 @@ def _gains(pool: list[dict], league, roster: list[dict], repl: dict,
         if skip is not None and key(r["name"], r["position"]) == skip:
             continue
         out.append((lineup_value(roster + [r], league, repl) - base, r))
-    out.sort(key=lambda t: (-t[0], -t[1]["vorp"]))
+    out.sort(key=lambda t: (-t[0], -own_gap(t[1], league, roster, repl)))
     return out
 
 
@@ -175,6 +234,39 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     """
     repl = league.replacement
     avail = [r for r in rows if key(r["name"], r["position"]) not in taken]
+
+    # Two filters, applied in order, each with its own fallback. Both matter:
+    # without them the board recommends nine tight ends (see roster_max).
+    #
+    #   1. rosterable depth -- drop the unpickable tail of each position, so
+    #      deep TEs and backup QBs stop crowding out real RB/WR depth.
+    #   2. roster construction -- drop positions THIS roster is already full
+    #      at, which is the only thing that still bites once every marginal
+    #      value has flattened to 0.
+    pos_depth = vbd.rosterable_depth(league)
+    held = collections.Counter(p["position"] for p in my_players)
+    caps = roster_max(league)
+
+    def in_depth(r):
+        return (r.get("pos_rank_n") is None
+                or r["pos_rank_n"] <= pos_depth.get(r["position"], 10**6))
+
+    def needed(r):
+        return held.get(r["position"], 0) < caps.get(r["position"], 99)
+
+    pool_rows = [r for r in avail if in_depth(r) and needed(r)]
+    if len(pool_rows) < limit:
+        # Relax depth before construction: a 4th RB beyond the nominal depth
+        # is a real pick, a 5th TE is not. Only if that still starves the
+        # board do we hand back the full list.
+        pool_rows = [r for r in avail if needed(r)]
+    if len(pool_rows) < limit:
+        seen = {id(r) for r in pool_rows}
+        flex_first = {"RB": 0, "WR": 0, "TE": 1, "QB": 2}
+        extra = sorted((r for r in avail if id(r) not in seen),
+                       key=lambda r: (flex_first.get(r["position"], 3), -r["vorp"]))
+        pool_rows = pool_rows + extra[: limit - len(pool_rows)]
+    avail = pool_rows
     ranked = _gains(avail, league, my_players, repl)
 
     # "Will he be back?" is a question about your NEXT turn, not this one. Scoring
@@ -183,7 +275,8 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     risk_at = following_pick or next_pick
     out = []
     for gain, r in ranked:
-        row = {**r, "marginal": round(gain, 1)}
+        row = {**r, "marginal": round(gain, 1),
+               "own_gap": round(own_gap(r, league, my_players, repl), 1)}
         if risk_at:
             row["gone_pct"] = round(
                 100 * (1 - survival(r.get("adp"), r.get("adp_sd"), risk_at)))
@@ -192,7 +285,7 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     if not following_pick:
         # Primary sort on marginal value; VORP breaks ties and keeps upside
         # visible once your starters are full and marginal values collapse to 0.
-        out.sort(key=lambda r: (-r["marginal"], -r["vorp"]))
+        out.sort(key=lambda r: (-r["marginal"], -r["own_gap"]))
         return out[:limit]
 
     pool = [r for _, r in ranked[:pool_size]]
@@ -206,7 +299,7 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     for row in out[depth:]:
         row["next_best"] = None
         row["plan"] = row["marginal"] - 1e6
-    out.sort(key=lambda r: (-r["plan"], -r["vorp"]))
+    out.sort(key=lambda r: (-r["plan"], -r["own_gap"]))
     for row in out[depth:]:
         row["plan"] = None
     return out[:limit]

@@ -111,8 +111,40 @@ def build(projections: list[dict], league) -> list[dict]:
     seen = {}
     for p in sorted(scored, key=lambda x: -x["points"]):
         seen[p["position"]] = seen.get(p["position"], 0) + 1
+        p["pos_rank_n"] = seen[p["position"]]
         p["pos_rank"] = f"{p['position']}{seen[p['position']]}"
 
     league.replacement = repl
     league.starters_used = used
     return scored
+
+
+def rosterable_depth(league) -> dict:
+    """How deep at each position the league can plausibly roster.
+
+    VORP alone puts TE13-TE30 above WR45 late in a draft: TE has a low
+    replacement level and a 133-man tail, so a barely-startable TE keeps
+    out-ranking a WR who is genuinely worth a bench spot. But only ~1 TE per
+    team ever gets rostered, so most of that tail is unpickable in practice
+    and just crowds the board.
+
+    Cap each position at league-wide starter demand plus a share of the bench,
+    allocated in proportion to how often the position actually starts. That is
+    what "rosterable" means: nobody drafts a 3rd TE in a 1-TE league.
+    """
+    used = league.starters_used or {}
+    total_started = sum(used.values()) or 1
+    bench_pool = league.teams * league.bench
+    depth = {}
+    for pos, n in used.items():
+        share = n / total_started
+        # Slack scales with the position's own share, not a flat round. A flat
+        # +teams is nothing for WR and enormous for TE, which is how TE12-TE30
+        # got back onto the late board.
+        slack = max(2, round(league.teams * share))
+        # Floor at one per team: even a position that loses its slot battle to
+        # another (TE vs WR in a combo WR/TE slot) still gets rostered ~1 deep
+        # per team, so the board must carry that many.
+        depth[pos] = max(league.teams,
+                         int(round(n + bench_pool * share + slack)))
+    return depth
