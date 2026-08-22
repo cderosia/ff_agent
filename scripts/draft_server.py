@@ -502,7 +502,8 @@ def state_for(name):
         "recs": [{"n": r["name"], "p": r["pos_rank"], "g": r["marginal"],
                   "v": r["vorp"], "e": r.get("edge"), "m": r.get("adp_rank"),
                   "s": r.get("rel_spread", 0), "gp": r.get("gone_pct"),
-                  "pl": r.get("plan")} for r in recs],
+                  "pl": r.get("plan"), "bv": r.get("bench_val"),
+                  "xs": r.get("exp_starts")} for r in recs],
         "value": [{"n": r["name"], "p": r["pos_rank"], "e": r["edge"],
                    "m": r["adp_rank"]} for r in value],
         "gone": [{"n": r["name"], "p": r["pos_rank"]} for r in gone],
@@ -626,7 +627,9 @@ function render(d){
  // The bar has to be drawn from the SAME number the rows are sorted by, or it
  // reads as a broken list. `pl` (value now + expected value of your next pick)
  // is the sort key whenever we know your pick numbers; `g` otherwise.
- const sv=r=>r.pl!=null?r.pl:r.g;
+ // Marginal value and plan are 0 for everyone from ~round 7, so the bar has
+ // to fall through to season value or it goes uniformly blank for half the draft.
+ const sv=r=>{const a=r.pl!=null?r.pl:r.g; return a!==0?a:(r.bv??0);};
  // Scale across the real range, not from zero: the sort key sits in a narrow
  // band well above zero, so a zero-based bar is visually flat and says nothing.
  const mn=Math.min(...d.recs.map(sv));
@@ -699,6 +702,8 @@ function render(d){
  const ordered=d.recs.some(r=>r.pl!=null);
  h+=`<div class=card><div class=lbl>take now</div>`
   +`<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
+  +`, then by <b>expected season points</b> (starts x value over a streamer)`
+  +` once your starters are full`
   +(ordered?` <b>plus what you'd still get at your next pick</b> — so a player`
     +` who won't last can outrank one worth slightly more who will`:'')
   +`</div><div class=filters>`;
@@ -721,7 +726,8 @@ function render(d){
    +`${esc(r.n)} ${pos(r.p)}${r.s>0.2?' <span title="sources disagree" style="color:var(--warn)">◆</span>':''}`
    +`${brk?' <span class=tiertag>TIER '+te.tier+'</span>':''}</td>`
    +`<td class="num acc">+${Math.round(r.g)}</td>`
-   +`<td class="num dim">${Math.round(r.v)}</td>`
+   +`<td class="num dim" title="expected starts: ${r.xs??'—'}">`
+   +`${r.bv==null?'—':Math.round(r.bv)}</td>`
    +`<td class=num>${gone(r.gp)}</td>`
    +`<td class="num dim">${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
  if(!shown.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;

@@ -26,6 +26,7 @@ import math
 
 import requests
 
+from . import starts as starts_mod
 from . import vbd
 from .names import key
 from .stats import SLOT_ELIGIBILITY
@@ -278,9 +279,13 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     # already making -- which is answered by the fact that he's sitting there.
     risk_at = following_pick or next_pick
     out = []
+    snaps = starts_mod.snap_share()
+    waiver = starts_mod.waiver_level(rows, league)
     for gain, r in ranked:
         row = {**r, "marginal": round(gain, 1),
-               "own_gap": round(own_gap(r, league, my_players, repl), 1)}
+               "own_gap": round(own_gap(r, league, my_players, repl), 1),
+               "exp_starts": starts_mod.expected_starts(r, my_players, league, snaps),
+               "bench_val": starts_mod.bench_value(r, my_players, league, waiver, snaps)}
         if risk_at:
             row["gone_pct"] = round(
                 100 * (1 - survival(r.get("adp"), r.get("adp_sd"), risk_at)))
@@ -289,7 +294,7 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     if not following_pick:
         # Primary sort on marginal value; VORP breaks ties and keeps upside
         # visible once your starters are full and marginal values collapse to 0.
-        out.sort(key=lambda r: (-r["marginal"], -r["own_gap"]))
+        out.sort(key=lambda r: (-r["marginal"], -r["bench_val"], -r["own_gap"]))
         return out[:limit]
 
     pool = [r for _, r in ranked[:pool_size]]
@@ -303,7 +308,7 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     for row in out[depth:]:
         row["next_best"] = None
         row["plan"] = row["marginal"] - 1e6
-    out.sort(key=lambda r: (-r["plan"], -r["own_gap"]))
+    out.sort(key=lambda r: (-r["plan"], -r["bench_val"], -r["own_gap"]))
     for row in out[depth:]:
         row["plan"] = None
     return out[:limit]
