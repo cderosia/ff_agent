@@ -25,6 +25,7 @@ to `_sim_<league>.json`, never the real pick file.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import pathlib
 import random
@@ -43,6 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ff import board as board_mod        # noqa: E402
 from ff import draft as draft_mod        # noqa: E402
+from ff import vbd as vbd_mod            # noqa: E402
 from ff.leagues import _env, load_all    # noqa: E402
 from ff.names import key                 # noqa: E402
 from ff.projections import fetch         # noqa: E402
@@ -396,7 +398,7 @@ def sim_state(name):
     }
 
 
-def tier_breaks(rows, position, n=14):
+def tier_breaks(rows, position, dyn, n=14):
     """Mark where the cliff is within a position.
 
     A tier break is a drop to the next player that's much larger than the
@@ -411,18 +413,20 @@ def tier_breaks(rows, position, n=14):
     # The floor has to scale with the position, not be a fixed number of points.
     # At the top of a board the gaps are naturally big, so a flat threshold makes
     # every elite player his own tier -- which tells you nothing.
-    span = max(1.0, at[0]["vorp"] - at[-1]["vorp"])
+    dv = lambda r: dyn.get(key(r["name"], r["position"]), {}).get(
+        "dyn_vorp", r["vorp"])
+    span = max(1.0, dv(at[0]) - dv(at[-1]))
     threshold = max(typical * 2.2, span * 0.14)
     out, tier = [], 1
     for i, r in enumerate(at):
-        out.append({"n": r["name"], "p": r["pos_rank"], "v": round(r["vorp"]),
+        out.append({"n": r["name"], "p": r["pos_rank"], "v": round(dv(r)),
                     "tier": tier})
         if i < len(gaps) and gaps[i] > threshold:
             tier += 1
     return out
 
 
-def wait_cost(rows, taken_keys, next_pick, following_pick):
+def wait_cost(rows, taken_keys, next_pick, following_pick, dyn, on_clock):
     """Per position: best now vs. best likely to survive to your next pick."""
     out = {}
     for pos in ("QB", "RB", "WR", "TE"):
@@ -430,15 +434,23 @@ def wait_cost(rows, taken_keys, next_pick, following_pick):
               and key(r["name"], r["position"]) not in taken_keys]
         if not at:
             continue
-        best = max(at, key=lambda r: r["vorp"])
+        dv = lambda r: dyn.get(key(r["name"], r["position"]), {}).get(
+            "dyn_vorp", r["vorp"])
+        best = max(at, key=dv)
+        # Where he goes NEXT, not where he went on paper: a player 40th in the
+        # remaining market goes around pick on_clock+39, whatever his preseason
+        # ADP rank said before 60 players came off the board.
+        def goes_at(r):
+            k = dyn.get(key(r["name"], r["position"]), {}).get("dyn_adp_rank")
+            return None if k is None else on_clock + k - 1
         survivors = [r for r in at
-                     if r.get("adp_rank") and r["adp_rank"] >= following_pick]
-        later = max(survivors, key=lambda r: r["vorp"]) if survivors else None
+                     if (goes_at(r) or 0) >= following_pick]
+        later = max(survivors, key=dv) if survivors else None
         out[pos] = {
-            "now": best["name"], "now_v": round(best["vorp"]),
+            "now": best["name"], "now_v": round(dv(best)),
             "later": later["name"] if later else None,
-            "later_v": round(later["vorp"]) if later else None,
-            "cost": round(best["vorp"] - later["vorp"]) if later else None,
+            "later_v": round(dv(later)) if later else None,
+            "cost": round(dv(best) - dv(later)) if later else None,
         }
     return out
 
@@ -484,12 +496,22 @@ def state_for(name):
     recs = draft_mod.recommend(rows, L, taken, mine, limit=60,
                                next_pick=my_next, following_pick=my_next + gap)
     avail = [r for r in rows if key(r["name"], r["position"]) not in taken]
+    # One live view of the remaining pool, shared by tiers, cost-of-waiting and
+    # the value list, so nothing on the page is still quoting the preseason.
+    taken_by_pos = collections.Counter(
+        r["position"] for r in rows if key(r["name"], r["position"]) in taken)
+    live_repl = vbd_mod.dynamic_replacement(avail, L, taken_by_pos)
+    dyn = board_mod.live_ranks(avail, live_repl)
     value = sorted((r for r in avail
-                    if r.get("edge") is not None and r["vbd_rank"] <= 170),
-                   key=lambda r: -r["edge"])[:8]
+                    if dyn.get(key(r["name"], r["position"]), {}).get("dyn_edge")
+                    is not None
+                    and dyn[key(r["name"], r["position"])]["dyn_rank"] <= 170),
+                   key=lambda r: -dyn[key(r["name"], r["position"])]["dyn_edge"])[:8]
     horizon = on_clock + (until or 0) + gap
-    gone = sorted((r for r in avail if r.get("adp_rank") and r["adp_rank"] < horizon),
-                  key=lambda r: r["adp_rank"])[:10]
+    gone = sorted((r for r in avail
+                   if (dyn.get(key(r["name"], r["position"]), {}).get("dyn_adp_rank")
+                       or 10**6) + on_clock - 1 < horizon),
+                  key=lambda r: dyn[key(r["name"], r["position"])]["dyn_adp_rank"])[:10]
 
     return {
         "league": name, "leagues": list(CTX), "teams": L.teams,
@@ -500,19 +522,24 @@ def state_for(name):
                  if s not in ("K", "DST")},
         "roster": [{"n": p["name"], "p": p["pos_rank"]} for p in mine],
         "recs": [{"n": r["name"], "p": r["pos_rank"], "g": r["marginal"],
-                  "v": r["vorp"], "e": r.get("edge"), "m": r.get("adp_rank"),
+                  "v": r["vorp"],
+                  "e": dyn.get(key(r["name"], r["position"]), {}).get("dyn_edge"),
+                  "m": dyn.get(key(r["name"], r["position"]), {}).get("dyn_adp_rank"),
                   "s": r.get("rel_spread", 0), "gp": r.get("gone_pct"),
+                  "dv": dyn.get(key(r["name"], r["position"]), {}).get("dyn_vorp"),
                   "pl": r.get("plan"), "bv": r.get("bench_val"),
                   "xs": r.get("exp_starts")} for r in recs],
-        "value": [{"n": r["name"], "p": r["pos_rank"], "e": r["edge"],
-                   "m": r["adp_rank"]} for r in value],
+        "value": [{"n": r["name"], "p": r["pos_rank"],
+                   "e": dyn[key(r["name"], r["position"])]["dyn_edge"],
+                   "m": dyn[key(r["name"], r["position"])]["dyn_adp_rank"]}
+                  for r in value],
         "gone": [{"n": r["name"], "p": r["pos_rank"]} for r in gone],
         "last": [{"n": p["name"], "p": p.get("position"), "no": p["pick_no"]}
                  for p in picks[-6:]][::-1],
-        "tiers": {pos: tier_breaks([r for r in avail], pos)
+        "tiers": {pos: tier_breaks([r for r in avail], pos, dyn)
                   for pos in ("QB", "RB", "WR", "TE")},
         "wait": wait_cost(rows, taken, on_clock + (until or 0),
-                          on_clock + (until or 0) + gap),
+                          on_clock + (until or 0) + gap, dyn, on_clock),
         "run": positional_run(picks),
         "sim": sim_state(name),
         "ts": time.strftime("%H:%M:%S"),

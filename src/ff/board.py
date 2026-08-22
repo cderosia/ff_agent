@@ -74,3 +74,35 @@ def reaches(rows, limit=15):
     """Players the room overvalues most (let someone else pay)."""
     c = [r for r in rows if r["edge"] is not None and r["adp_rank"] <= 120]
     return sorted(c, key=lambda r: r["edge"])[:limit]
+
+
+def live_ranks(avail: list[dict], replacement: dict) -> dict:
+    """Re-rank what is LEFT, against remaining supply and the remaining market.
+
+    Everything the static board computes -- vorp, your rank, the market's rank,
+    edge -- describes the pool as it stood before anyone picked. Ten rounds in
+    that pool no longer exists, so a board still quoting it is answering a
+    question nobody asked. This recomputes all four over the players actually
+    available, so value, tiers and cost-of-waiting all speak about the draft in
+    front of you rather than the one on paper.
+
+    Returns {player key: {dyn_vorp, dyn_rank, dyn_adp_rank, dyn_edge}}.
+    """
+    scored = sorted(
+        ((r["points"] - replacement.get(r["position"], 0.0), r) for r in avail),
+        key=lambda t: -t[0])
+    you = {key(r["name"], r["position"]): i
+           for i, (_, r) in enumerate(scored, 1)}
+    priced = sorted((r for r in avail if r.get("adp")), key=lambda r: r["adp"])
+    mkt = {key(r["name"], r["position"]): i for i, r in enumerate(priced, 1)}
+
+    out = {}
+    for v, r in scored:
+        k = key(r["name"], r["position"])
+        out[k] = {
+            "dyn_vorp": round(v, 1),
+            "dyn_rank": you[k],
+            "dyn_adp_rank": mkt.get(k),
+            "dyn_edge": (mkt[k] - you[k]) if k in mkt else None,
+        }
+    return out
