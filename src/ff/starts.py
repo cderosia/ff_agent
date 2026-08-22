@@ -32,11 +32,21 @@ DATA = pathlib.Path(__file__).resolve().parents[2] / "data" / "raw"
 # a draft-day bench pick shouldn't be valued on games you may never play.
 FANTASY_WEEKS = range(1, 15)
 
-# Per-week probability a given starter is unavailable. These are ASSUMPTIONS,
-# not measurements -- roughly the shape of published positional injury rates
-# (RBs absorb the most contact, QBs the least). They set how much the board
-# values depth, so they are one number to revisit, not to bury.
-MISS_RATE = {"RB": 0.14, "WR": 0.10, "TE": 0.10, "QB": 0.07}
+# Per-week probability a given starter is unavailable, MEASURED over 2018-2025
+# by scripts/injury_rates.py: players drafted as starters by preseason ADP,
+# counted absent in any week they took no offensive snap (n = 8,622
+# player-weeks). Re-run that script to refresh these.
+#
+# These began as assumptions -- RB 0.14 / WR 0.10 / TE 0.10 / QB 0.07 -- and
+# every one was far too low. The ordering survived (RBs do miss the most) but
+# the spread did not: real risk is much flatter across positions than the
+# assumption implied, so depth at EVERY position is worth more than the board
+# used to think, and RB depth is not the outlier it was priced as.
+#
+# Note this is unavailability, not injury alone: a benched starter or one who
+# loses his job counts, which is correct for the question being asked -- does a
+# slot open up -- but broader than a medical injury rate.
+MISS_RATE = {"RB": 0.22, "WR": 0.18, "TE": 0.20, "QB": 0.17}
 
 # A player already on the field is genuinely next-man-up; one who barely played
 # is a projection betting on a role he does not have yet. Scales the injury
