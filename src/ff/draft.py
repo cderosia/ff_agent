@@ -232,8 +232,12 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
     you the scraps. Without pick numbers we can't know what survives, so it falls
     back to the greedy ordering.
     """
-    repl = league.replacement
     avail = [r for r in rows if key(r["name"], r["position"]) not in taken]
+    # Replacement has to track remaining supply or the board flatlines from
+    # round 7 on -- see vbd.dynamic_replacement.
+    taken_by_pos = collections.Counter(
+        r["position"] for r in rows if key(r["name"], r["position"]) in taken)
+    repl = vbd.dynamic_replacement(avail, league, taken_by_pos)
 
     # Two filters, applied in order, each with its own fallback. Both matter:
     # without them the board recommends nine tight ends (see roster_max).

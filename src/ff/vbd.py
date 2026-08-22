@@ -148,3 +148,38 @@ def rosterable_depth(league) -> dict:
         depth[pos] = max(league.teams,
                          int(round(n + bench_pool * share + slack)))
     return depth
+
+
+def dynamic_replacement(avail: list[dict], league, taken_by_pos: dict) -> dict:
+    """Replacement level against REMAINING supply, not the preseason universe.
+
+    The static levels in `replacement_levels` are computed once over the whole
+    player pool, so they describe the market before anyone has picked. Six
+    rounds in, every RB above that line is gone, every player left grades at or
+    below it, and the board's marginal values all collapse to 0.0 -- which is
+    true but useless, and hands the ranking to whatever tiebreak comes next.
+
+    Recomputing against who is actually left restores the comparison that
+    matters mid-draft: not "is he better than a preseason RB30", but "is he
+    better than the next man at his position I could take instead".
+
+    Replacement for a position is the best available player past whatever
+    league-wide starter demand is still unmet there.
+    """
+    by_pos = {}
+    for p in avail:
+        by_pos.setdefault(p["position"], []).append(p["points"])
+    for pts in by_pos.values():
+        pts.sort(reverse=True)
+
+    started = league.starters_used or {}
+    repl = {}
+    for pos, pts in by_pos.items():
+        remaining = max(0, started.get(pos, 0) - taken_by_pos.get(pos, 0))
+        if not pts:
+            repl[pos] = 0.0
+        elif remaining < len(pts):
+            repl[pos] = pts[remaining]
+        else:
+            repl[pos] = pts[-1]
+    return repl
