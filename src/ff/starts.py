@@ -161,35 +161,55 @@ def expected_starts(player: dict, roster: list[dict], league,
                     snaps: dict | None = None) -> float:
     """Weeks this player is expected to be in your starting lineup.
 
-    Walks the fantasy season week by week. He starts when the players ahead of
-    him at his position are on bye or hurt in numbers that open a slot -- which
-    is why a player whose bye lines up with your starters' is worth less than
-    one who covers them.
+    Walks the fantasy season week by week and actually fills the lineup each
+    week, rather than counting how many slots his position *could* occupy. That
+    distinction matters: with two running backs sitting in your flex, a fourth
+    receiver is not one of five startable receivers, he is behind five better
+    players. Counting slots by position claimed he'd start almost every week
+    while the board simultaneously said he improved nothing.
     """
+    from .draft import _assign          # local: draft imports this module
+
     snaps = snaps if snaps is not None else snap_share()
     byes = bye_by_team()
     pos = player["position"]
-    slots = _slots_for(pos, league)
-    if not slots:
+    elig = [slot for slot, cnt in league.starters.items()
+            if slot not in ("K", "DST")
+            and pos in SLOT_ELIGIBILITY.get(slot, {slot}) and cnt]
+    if not elig:
         return 0.0
 
-    ahead = [p for p in roster
-             if p["position"] == pos and p["points"] > player["points"]]
-    my_bye = bye_for(player.get("team"), byes)
-    miss = MISS_RATE.get(pos, 0.10)
+    me = (player["name"], pos)
+    miss = MISS_RATE.get(pos, 0.18)
     opp = _opportunity(player, snaps)
+    my_bye = bye_for(player.get("team"), byes)
 
     total = 0.0
     for wk in FANTASY_WEEKS:
         if my_bye == wk:
-            continue                       # he can't start on his own bye
-        live = [p for p in ahead if bye_for(p.get("team"), byes) != wk]
-        if len(live) < slots:
-            total += 1.0                   # a slot is open on merit or by bye
+            continue                    # he can't start on his own bye
+        live = [p for p in roster if bye_for(p.get("team"), byes) != wk]
+        filled = _assign(live + [player], league)
+
+        starters, blockers = set(), []
+        for slot, got in filled.items():
+            for g in got:
+                starters.add((g["name"], g["position"]))
+                if slot in elig:
+                    blockers.append(g)
+        if me in starters:
+            total += 1.0               # he starts outright, byes included
             continue
-        # Everyone ahead is playing: he needs enough of them to be hurt.
-        need = len(live) - slots + 1
-        total += _p_at_least(need, len(live), miss) * opp
+
+        # He's behind the men holding the slots he could fill. Anyone on the
+        # bench who outscores him is ahead of him in that queue.
+        queue = sum(1 for p in live
+                    if (p["name"], p["position"]) not in starters
+                    and p["position"] in {pos} | {q for slot in elig
+                                                  for q in SLOT_ELIGIBILITY.get(slot, {slot})}
+                    and p["points"] > player["points"])
+        need = queue + 1
+        total += _p_at_least(need, len(blockers), miss) * opp
     return round(total, 2)
 
 

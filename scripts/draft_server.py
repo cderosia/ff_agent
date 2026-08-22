@@ -45,11 +45,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from ff import board as board_mod        # noqa: E402
 from ff import draft as draft_mod        # noqa: E402
 from ff import vbd as vbd_mod            # noqa: E402
+from ff import starts as starts_mod      # noqa: E402
+from ff import why as why_mod            # noqa: E402
 from ff.leagues import _env, load_all    # noqa: E402
 from ff.names import key                 # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
 LOCK = threading.Lock()
+BYES = starts_mod.bye_by_team()
 PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
 PICK_CACHE: dict = {}   # league name -> (timestamp, picks)
@@ -419,9 +422,11 @@ def tier_breaks(rows, position, dyn, n=14):
     threshold = max(typical * 2.2, span * 0.14)
     out, tier = [], 1
     for i, r in enumerate(at):
+        last = i < len(gaps) and gaps[i] > threshold
         out.append({"n": r["name"], "p": r["pos_rank"], "v": round(dv(r)),
-                    "tier": tier})
-        if i < len(gaps) and gaps[i] > threshold:
+                    "tier": tier, "last_of_tier": last,
+                    "drop": round(gaps[i], 1) if last else None})
+        if last:
             tier += 1
     return out
 
@@ -513,8 +518,19 @@ def state_for(name):
                        or 10**6) + on_clock - 1 < horizon),
                   key=lambda r: dyn[key(r["name"], r["position"])]["dyn_adp_rank"])[:10]
 
+    tiers = {pos: tier_breaks([r for r in avail], pos, dyn)
+             for pos in ("QB", "RB", "WR", "TE")}
+    tier_of = {t["n"]: t for rows_ in tiers.values() for t in rows_}
+    run = positional_run(picks)
+    top3 = [{"n": r["name"], "p": r["pos_rank"],
+             "why": why_mod.reasons(r, L, mine, next_pick=my_next,
+                                    following_pick=my_next + gap,
+                                    tier_of=tier_of, byes=BYES, run=run)}
+            for r in recs[:3]]
+
     return {
         "league": name, "leagues": list(CTX), "teams": L.teams,
+        "top3": top3,
         "manual": is_manual(name),
         "pool": [{"n": r["name"], "p": r["pos_rank"]} for r in avail[:320]],
         "on_clock": on_clock, "until": until, "slot": slot, "npicks": len(picks),
@@ -536,11 +552,10 @@ def state_for(name):
         "gone": [{"n": r["name"], "p": r["pos_rank"]} for r in gone],
         "last": [{"n": p["name"], "p": p.get("position"), "no": p["pick_no"]}
                  for p in picks[-6:]][::-1],
-        "tiers": {pos: tier_breaks([r for r in avail], pos, dyn)
-                  for pos in ("QB", "RB", "WR", "TE")},
+        "tiers": tiers,
         "wait": wait_cost(rows, taken, on_clock + (until or 0),
                           on_clock + (until or 0) + gap, dyn, on_clock),
-        "run": positional_run(picks),
+        "run": run,
         "sim": sim_state(name),
         "ts": time.strftime("%H:%M:%S"),
     }
@@ -617,6 +632,13 @@ cursor:pointer;font-size:12px;color:var(--dim)}
 .tierrow td{border-top:1px dashed #39445699}
 .tiertag{color:var(--warn);font-size:10px;letter-spacing:.1em}
 .run{background:#2a2113;border-color:#4a3a18;color:var(--warn)}
+.case{background:#101828;border-color:#24354f}
+.case ol{margin:0;padding-left:22px}
+.case li{margin-bottom:9px;line-height:1.45}
+.case li::marker{color:var(--acc);font-weight:700}
+.case .nm{font-weight:700}
+.case .rz{color:var(--dim);display:block;font-size:13px;margin-top:1px;
+white-space:normal}
 .wait table{font-size:13px}
 .wait .cost{color:var(--bad);font-weight:700}
 .wait .cheap{color:var(--go)}
@@ -715,6 +737,14 @@ function render(d){
  h+= g.length?g.map(([s,n])=>`<span class=need>${esc(s)} ×${n}</span>`).join('')
     :`<span class=need style="background:#12240f;color:var(--go)">starters full</span>`;
  h+=`</div></div>`;
+
+ if(d.top3&&d.top3.length){
+  h+=`<div class="card case"><div class=lbl>the case for your next pick</div><ol>`;
+  for(const t of d.top3)
+   h+=`<li><span class=nm>${esc(t.n)}</span> ${pos(t.p)}`
+    +`<span class=rz>${esc(t.why)}</span></li>`;
+  h+=`</ol></div>`;
+ }
 
  if(d.wait&&Object.keys(d.wait).length){
   h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
