@@ -691,9 +691,19 @@ def state_for(name):
         "manual": is_manual(name),
         "pool": [{"n": r["name"], "p": r["pos_rank"]} for r in avail[:320]],
         "on_clock": on_clock, "until": until, "slot": slot, "npicks": len(picks),
-        "gaps": {s: n for s, n in draft_mod.roster_gaps(mine, L).items()
-                 if s not in ("K", "DST")},
-        "roster": [{"n": p["name"], "p": p["pos_rank"],
+        # K and DST never enter `rows`, so roster_gaps can't see them filled or
+        # empty. `late` already worked out which you still need -- use it, so
+        # the roster shows every starting slot rather than quietly hiding two.
+        "gaps": {**{s: n for s, n in draft_mod.roster_gaps(mine, L).items()
+                    if s not in ("K", "DST")},
+                 **{s: 1 for s in (late or {}).get("need", [])}},
+        # Drafted kickers and defenses come off the pick records, not the
+        # board, or your roster would silently omit them.
+        "roster": [{"n": p.get("name"), "p": (p.get("position") or "").upper(),
+                    "k": False}
+                   for p in mine_raw
+                   if (p.get("position") or "").upper() in DST_POS | {"K"}]
+                  + [{"n": p["name"], "p": p["pos_rank"],
                     "k": key(p["name"], p["position"])
                          in {key(r["name"], r["position"]) for r in keepers_rows}}
                    for p in mine],
@@ -973,16 +983,6 @@ function render(d){
  }
  h+=lateCard;
 
- if(d.wait&&Object.keys(d.wait).length){
-  h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
-  for(const p in d.wait){const w=d.wait[p];
-   const c=(w.cost==null)?'—':(w.cost>12?`<span class=cost>-${w.cost}</span>`
-        :`<span class=cheap>-${w.cost}</span>`);
-   h+=`<tr><td>${pos(p)}</td><td>${esc(w.now)} <span class=pos>(${w.now_v})</span></td>`
-    +`<td class=pos>&rarr; ${w.later?esc(w.later)+' ('+w.later_v+')':'nobody survives'}</td>`
-    +`<td class=num>${c}</td></tr>`;}
-  h+=`</table></div>`;}
-
  const ordered=d.recs.some(r=>r.pl!=null);
  h+=`<div class=card><div class=lbl>take now</div>`
   +`<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
@@ -1017,6 +1017,16 @@ function render(d){
    +`<td class="num dim">${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
  if(!shown.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;
  h+=`</table></div></div>`;
+ if(d.wait&&Object.keys(d.wait).length){
+  h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
+  for(const p in d.wait){const w=d.wait[p];
+   const c=(w.cost==null)?'—':(w.cost>12?`<span class=cost>-${w.cost}</span>`
+        :`<span class=cheap>-${w.cost}</span>`);
+   h+=`<tr><td>${pos(p)}</td><td>${esc(w.now)} <span class=pos>(${w.now_v})</span></td>`
+    +`<td class=pos>&rarr; ${w.later?esc(w.later)+' ('+w.later_v+')':'nobody survives'}</td>`
+    +`<td class=num>${c}</td></tr>`;}
+  h+=`</table></div>`;}
+
  h+=`<div class=card><div class=lbl>value — falling past their price</div><table>`;
  for(const r of d.value)
   h+=`<tr><td>${esc(r.n)} ${pos(r.p)}</td><td class=num>mkt ${r.m}</td><td class=num>${sg(r.e)}</td></tr>`;
