@@ -100,6 +100,10 @@ def prepare(leagues, cfgs, proj):
             me = cfg.get("owner_id")
         else:
             me = "me"          # manual entry tags your own picks directly
+        if cfg.get("ingest"):
+            # Scraped picks are tagged "me"/"other" by the draft room's own
+            # myTeam marker, not by platform team id.
+            me = "me"
 
         # An explicitly configured slot WINS. The platform is only asked when
         # leagues.yaml doesn't say. Previously the API answer overwrote the
@@ -143,6 +147,7 @@ def prepare(leagues, cfgs, proj):
         CTX[L.name] = {"league": L, "rows": rows, "meta": meta, "me": me,
                        "slot": slot, "rounds": L.starter_slots + L.bench,
                        "keepers": keepers_rows, "keeper_rounds": keeper_rounds,
+                       "ingest": bool(cfg.get("ingest")),
                        "id_map": {p["espn_id"]: p for p in proj if p.get("espn_id")}}
         print(f"  {L.name:16} {L.teams:>2}tm {L.platform:8} slot {slot or '?'} "
               f"· {meta['source']}")
@@ -174,6 +179,39 @@ def add_manual_pick(name, player, mine):
     return picks
 
 
+def ingest_picks(name, rows):
+    """Replace this league's picks from a scraped draft room.
+
+    ESPN's read API publishes nothing while a draft is live (verified: zero
+    picks and zero rostered players across mDraftDetail and mRoster, held for
+    40+ seconds mid-draft, while a COMPLETED draft returns all of them). The
+    draft room itself has every pick in the DOM, so the browser scrapes it and
+    posts it here.
+
+    Deliberately a full replace rather than an append: the scraper re-sends the
+    whole board every tick, so a dropped request, a reload or a reconnect
+    self-heals on the next one. Appending would drift the moment one was missed.
+    """
+    board = {key(r["name"], r["position"]): r for r in CTX[name]["rows"]}
+    out, unmatched = [], []
+    for i, r in enumerate(sorted(rows, key=lambda x: x.get("pick_no") or 0), 1):
+        nm, pos = r.get("name") or "", r.get("position")
+        row = board.get(key(nm, pos))
+        if row is None:                      # K/DST aren't on our board at all
+            unmatched.append(nm)
+        out.append({"pick_no": r.get("pick_no") or i,
+                    "round": r.get("round")
+                             or ((i - 1) // CTX[name]["league"].teams + 1),
+                    "name": row["name"] if row else nm,
+                    "position": row["position"] if row else pos,
+                    "by": "me" if r.get("mine") else "other",
+                    "slot": None})
+    PICKS_DIR.mkdir(parents=True, exist_ok=True)
+    manual_path(name).write_text(json.dumps(out))
+    PICK_CACHE.pop(name, None)
+    return out, unmatched
+
+
 def undo_manual_pick(name):
     picks = manual_picks(name)[:-1]
     manual_path(name).write_text(json.dumps(picks))
@@ -183,8 +221,11 @@ def undo_manual_pick(name):
 
 def is_manual(name):
     # A practice draft is its own feed, so it reads from the local pick file even
-    # for a league that normally polls ESPN or Sleeper.
-    return name in SIM or CTX[name]["league"].platform not in ("sleeper", "espn")
+    # for a league that normally polls ESPN or Sleeper. So is a league fed by the
+    # browser scraper -- there is no API to poll for it.
+    return (name in SIM
+            or CTX[name].get("ingest")
+            or CTX[name]["league"].platform not in ("sleeper", "espn"))
 
 
 def picks_for(name, hot=False):
@@ -986,9 +1027,49 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, body: bytes):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # The scraper posts from fantasy.espn.com, so this is cross-origin. The
+        # server is bound to localhost and holds nothing secret, so a blanket
+        # allow is fine and saves fighting preflight on draft day.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        # Chrome's Private Network Access: a page on a public origin
+        # (fantasy.espn.com) reaching a private one (localhost) is blocked
+        # unless the local server opts in. Without this the scraper's requests
+        # just hang -- no CORS error, no refusal, they simply never resolve.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
+    def do_POST(self):
+        if not self.path.startswith("/ingest"):
+            self.send_response(404)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        name = (q.get("league") or [""])[0]
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(n).decode() or "{}")
+            with LOCK:
+                if name not in CTX:
+                    raise KeyError(f"no league {name!r}")
+                picks, unmatched = ingest_picks(name, payload.get("picks") or [])
+                body = json.dumps({"ok": True, "picks": len(picks),
+                                   "unmatched": unmatched[:10],
+                                   "on_clock": len(picks) + 1}).encode()
+        except Exception as e:
+            body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
+        self._json(body)
 
     def do_GET(self):
         if self.path.startswith("/sim/reset"):
