@@ -52,6 +52,7 @@ from ff.names import key, normalize      # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
 LOCK = threading.Lock()
+INGEST_TS = {}
 BYES = starts_mod.bye_by_team()
 PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
@@ -209,6 +210,7 @@ def ingest_picks(name, rows):
     PICKS_DIR.mkdir(parents=True, exist_ok=True)
     manual_path(name).write_text(json.dumps(out))
     PICK_CACHE.pop(name, None)
+    INGEST_TS[name] = time.time()
     return out, unmatched
 
 
@@ -638,6 +640,9 @@ def state_for(name):
                          in {key(r["name"], r["position"]) for r in keepers_rows}}
                    for p in mine],
         "keeper_rounds": sorted(spent),
+        "bridge": ({"age": round(time.time() - INGEST_TS[name])}
+                   if c.get("ingest") and name in INGEST_TS
+                   else ({"age": None} if c.get("ingest") else None)),
         "recs": [{"n": r["name"], "p": r["pos_rank"], "g": r["marginal"],
                   "v": r["vorp"],
                   "e": dyn.get(key(r["name"], r["position"]), {}).get("dyn_edge"),
@@ -814,8 +819,23 @@ function render(d){
   if(d.reject) simcard+=`<div class="card err">${esc(d.reject)}</div>`;
  }
  let entry='';
- if(d.manual){
-  entry=`<div class="card entry"><div class=lbl>manual entry — no live feed for this league`
+ // A bridged league gets its picks from the ESPN draft room every 2s, and each
+ // post REPLACES the pick list. Typing here while that is live would be wiped
+ // within two ticks, so the entry box only appears once the bridge goes quiet
+ // -- at which point it is the fallback, and says so.
+ const br = d.bridge;
+ const bridgeLive = br && br.age != null && br.age < 12;
+ if(br){
+  entry = bridgeLive
+   ? `<div class="card entry"><div class=lbl>live from the espn draft room</div>`
+     +`<div>picks are arriving automatically `
+     +`<span class=pos>· last sync ${br.age}s ago</span></div></div>`
+   : `<div class="card err"><div class=lbl>bridge not connected</div>`
+     +`<div>No picks received${br.age==null?' yet':` for ${br.age}s`}. `
+     +`Open the ESPN draft room with the userscript active, or enter picks by hand below.</div></div>`;
+ }
+ if(d.manual && !bridgeLive){
+  entry+=`<div class="card entry"><div class=lbl>manual entry — no live feed for this league`
    +`<span class=undo onclick="undoPick()">undo last</span></div>`
    +`<input id=q placeholder="type a name, then click to mark drafted…" `
    +`autocomplete=off oninput="SEL=0;hits()" onkeydown="navHits(event)">`

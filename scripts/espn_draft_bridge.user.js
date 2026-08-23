@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         FF Agent — ESPN draft bridge
 // @namespace    local.ffagent
-// @version      1.0
+// @version      1.1
+// @author       Carter
 // @description  Mirror an ESPN draft room into the local draft board. Read-only; data never leaves this machine.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -47,8 +48,8 @@
         const [round, slot] = T(c.querySelector(".roundPick")).split(".").map(Number);
         return {
           round, slot,
-          name: `${T(c.querySelector(".playerFirstName"))} `
-              + `${T(c.querySelector(".playerLastName"))}`.trim(),
+          name: (T(c.querySelector(".playerFirstName")) + " "
+                 + T(c.querySelector(".playerLastName"))).trim(),
           team: T(c.querySelector(".playerProTeam")),
           position: T(c.querySelector(".positionPill")),
           // The room tags your own cells, so ownership needs no id matching.
