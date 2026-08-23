@@ -568,8 +568,13 @@ def positional_run(picks, window=8):
 DST_POS = {"DEF", "DST", "D/ST"}
 
 
-def late_needs(name, picks, mine_raw):
-    """Kickers and defenses still available, and whether you still need one."""
+def special_pool(name, picks, mine_raw):
+    """Kickers and defenses still available, plus which you still need.
+
+    The pools are returned whether or not you need one, because they back the
+    DST and K tabs on the board -- you want to be able to look before it's
+    urgent. `need` is what decides whether the reminder card is shown.
+    """
     c = CTX[name]
     L = c["league"]
     taken_txt = " | ".join((p.get("name") or "") for p in picks).upper()
@@ -587,17 +592,15 @@ def late_needs(name, picks, mine_raw):
     have_k = any((p.get("position") or "").upper() == "K" for p in mine_raw)
 
     dst = [d for d in c.get("dst") or []
-           if not gone(d["name"], d["team"], d.get("nick"))][:6]
-    ks = [k for k in c.get("kickers") or [] if not gone(k["name"])][:6]
+           if not gone(d["name"], d["team"], d.get("nick"))][:12]
+    ks = [k for k in c.get("kickers") or [] if not gone(k["name"])][:12]
     need = []
     if L.starters.get("DST") and not have_dst:
         need.append("DST")
     if L.starters.get("K") and not have_k:
         need.append("K")
-    if not need:
-        return None
-    return {"need": need, "dst": dst if "DST" in need else [],
-            "k": ks if "K" in need else []}
+    return {"need": need, "dst": dst, "k": ks,
+            "slots": [x for x in ("DST", "K") if L.starters.get(x)]}
 
 
 def state_for(name):
@@ -674,7 +677,7 @@ def state_for(name):
                   key=lambda r: dyn[key(r["name"], r["position"])]["dyn_adp_rank"])[:10]
 
     mine_raw = [p for p in picks if p.get("by") == c["me"]]
-    late = late_needs(name, picks, mine_raw)
+    late = special_pool(name, picks, mine_raw)
     tiers = {pos: tier_breaks([r for r in avail], pos, dyn)
              for pos in ("QB", "RB", "WR", "TE")}
     tier_of = {t["n"]: t for rows_ in tiers.values() for t in rows_}
@@ -696,7 +699,7 @@ def state_for(name):
         # the roster shows every starting slot rather than quietly hiding two.
         "gaps": {**{s: n for s, n in draft_mod.roster_gaps(mine, L).items()
                     if s not in ("K", "DST")},
-                 **{s: 1 for s in (late or {}).get("need", [])}},
+                 **{s: 1 for s in late.get("need", [])}},
         # Drafted kickers and defenses come off the pick records, not the
         # board, or your roster would silently omit them.
         "roster": [{"n": p.get("name"), "p": (p.get("position") or "").upper(),
@@ -950,7 +953,7 @@ function render(d){
  // moves to the top. The threshold is how many slots you still need: with two
  // holes and two rounds left, every remaining pick is spoken for.
  let lateCard='', lateLine='';
- if(d.late){
+ if(d.late && d.late.need.length){
   const need=d.late.need, left=d.rounds_left;
   const promote = left!=null && left <= need.length;
   const urgent  = left!=null && left <  need.length;
@@ -985,19 +988,47 @@ function render(d){
 
  const ordered=d.recs.some(r=>r.pl!=null);
  h+=`<div class=card><div class=lbl>take now</div>`
-  +`<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
+  +(FILTER==='DST'
+    ? `<div class=legend><b>projected points over the first three weeks</b>, with`
+      +` the matchups — a defense is a streaming slot, so you're drafting a`
+      +` favourable September, not a season. Source's own scoring, not your`
+      +` league's.</div>`
+    : FILTER==='K'
+    ? `<div class=legend><b>season projection</b>, scored under your league's`
+      +` rules where it publishes any. Take one in the last round.</div>`
+    : `<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
   +`, then by <b>expected season points</b> (starts x value over a streamer)`
   +` once your starters are full`
   +(ordered?` <b>plus what you'd still get at your next pick</b> — so a player`
     +` who won't last can outrank one worth slightly more who will`:'')
-  +`</div><div class=filters>`;
- for(const f of ['ALL','QB','RB','WR','TE'])
+  +`</div>`)
+  +`<div class=filters>`;
+ // DST and K get tabs too, so you can look at them before the last round --
+ // same numbers as the reminder card, just on demand.
+ const tabsFor=['ALL','QB','RB','WR','TE'].concat((d.late&&d.late.slots)||[]);
+ for(const f of tabsFor)
   h+=`<div class="f ${FILTER===f?'on':''}" onclick="setf('${f}')">${f}</div>`;
- h+=`</div><div class=scrollbox><table>`
-  +`<tr class=hd><td>player</td><td class=num>lineup</td>`
-  +`<td class=num title="expected season points: starts x value over a streamer">season</td>`
-  +`<td class=num>${ordered?'gone by next pick':''}</td>`
-  +`<td class=num>adp</td><td class=num>edge</td></tr>`;
+ h+=`</div><div class=scrollbox><table>`;
+ // The player columns mean nothing on the DST/K tabs, which bring their own.
+ if(FILTER!=='DST'&&FILTER!=='K')
+  h+=`<tr class=hd><td>player</td><td class=num>lineup</td>`
+   +`<td class=num title="expected season points: starts x value over a streamer">season</td>`
+   +`<td class=num>${ordered?'gone by next pick':''}</td>`
+   +`<td class=num>adp</td><td class=num>edge</td></tr>`;
+ if(FILTER==='DST'||FILTER==='K'){
+  const rows=(FILTER==='DST'?(d.late&&d.late.dst):(d.late&&d.late.k))||[];
+  h+=FILTER==='DST'
+    ? `<tr class=hd><td>defense</td><td class=num>wks 1-3</td><td>opponents</td></tr>`
+    : `<tr class=hd><td>kicker</td><td class=num>proj</td><td></td></tr>`;
+  for(const x of rows)
+   h+= FILTER==='DST'
+    ? `<tr><td>${esc(x.name)}</td><td class="num acc">${x.pts}</td>`
+      +`<td class=opp>${esc(x.opps.join(', '))}</td></tr>`
+    : `<tr><td>${esc(x.name)} <span class=pos>${esc(x.team||'')}</span></td>`
+      +`<td class="num acc">${x.pts==null?'—':x.pts}</td><td></td></tr>`;
+  if(!rows.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;
+  h+=`</table></div></div>`;
+ } else {
  const shown=d.recs.filter(r=>FILTER==='ALL'||r.p.replace(/[0-9]/g,'')===FILTER);
  let prevTier=null;
  for(const r of shown){
@@ -1017,6 +1048,7 @@ function render(d){
    +`<td class="num dim">${r.m??'—'}</td><td class=num>${sg(r.e)}</td></tr>`;}
  if(!shown.length) h+=`<tr><td class=pos>nothing left at ${FILTER}</td></tr>`;
  h+=`</table></div></div>`;
+ }
  if(d.wait&&Object.keys(d.wait).length){
   h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
   for(const p in d.wait){const w=d.wait[p];
