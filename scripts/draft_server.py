@@ -194,15 +194,27 @@ def ingest_picks(name, rows):
     self-heals on the next one. Appending would drift the moment one was missed.
     """
     board = {key(r["name"], r["position"]): r for r in CTX[name]["rows"]}
+    teams = CTX[name]["league"].teams
+
+    # ESPN's draft board grid is laid out COLUMN-MAJOR -- every one of a team's
+    # picks, then the next team's -- so DOM order is not draft order. Trusting
+    # it made the first N cells look like picks 1..N of the draft, when they
+    # were really one manager's whole column. Round and slot come off the cell
+    # itself ("3.1"), so derive the real overall number from those.
+    def overall(r):
+        rd, slot = r.get("round"), r.get("slot")
+        if rd and slot:
+            return (int(rd) - 1) * teams + int(slot)
+        return r.get("pick_no") or 0
+
     out, unmatched = [], []
-    for i, r in enumerate(sorted(rows, key=lambda x: x.get("pick_no") or 0), 1):
+    for i, r in enumerate(sorted(rows, key=overall), 1):
         nm, pos = r.get("name") or "", r.get("position")
         row = board.get(key(nm, pos))
         if row is None:                      # K/DST aren't on our board at all
             unmatched.append(nm)
-        out.append({"pick_no": r.get("pick_no") or i,
-                    "round": r.get("round")
-                             or ((i - 1) // CTX[name]["league"].teams + 1),
+        out.append({"pick_no": overall(r) or i,
+                    "round": r.get("round") or ((i - 1) // teams + 1),
                     "name": row["name"] if row else nm,
                     "position": row["position"] if row else pos,
                     "by": "me" if r.get("mine") else "other",
