@@ -15,7 +15,7 @@ open http://localhost:8777
 
 | league | platform | what you do |
 |---|---|---|
-| `719` | Sleeper | nothing — picks arrive on their own |
+| `719` | Sleeper | nothing — picks arrive on their own (**set your slot first**) |
 | `freinds-keeper` | Sleeper | nothing — keepers are already loaded |
 | `family` | ESPN | open the draft room; the userscript bridges it |
 | `friends` | ESPN | open the draft room; the userscript bridges it |
@@ -40,8 +40,16 @@ Known: `work` 5, `freinds-keeper` 9, `friends` 1, `family` 10 (from ESPN).
 **`719` has none** — set it before that draft.
 
 Don't rely on the platform to supply it. ESPN's published order came back empty
-after a draft was reset, and Sleeper publishes nothing until the draft opens. A
-configured slot always wins over the platform's answer.
+after a draft was reset, and Sleeper publishes nothing until a draft is
+scheduled. A configured slot always wins over the platform's answer.
+
+Sleeper needs `owner_id` set too, or it can't find you in the draft order.
+All three Sleeper leagues use the same one.
+
+**Both feeds are confirmed live**, each against a real draft: Sleeper tracked
+one start to finish with picks landing in under a second, and the ESPN bridge
+carried a full 64-pick draft with your own picks correctly separated from the
+room's.
 
 **2. ESPN leagues only — install the bridge.** ESPN's API publishes *nothing*
 during a live draft (verified: zero picks while `inProgress`, then all of them
@@ -71,6 +79,11 @@ the board before the next one lands.
 reads *"live from the espn draft room · last sync 2s ago"*. If it says **bridge
 not connected**, the userscript isn't running — the manual entry box reappears
 underneath as the fallback.
+
+**Kickers and defenses have their own card.** They're off the main board on
+purpose, so it names the slots you still need and turns red when you have fewer
+rounds left than holes. Defenses are ranked by projected points over weeks 1-3
+with the matchups shown — you're drafting a favourable September, not a season.
 
 **Read the board in this order:**
 
