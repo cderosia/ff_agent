@@ -57,11 +57,12 @@ BYES = starts_mod.bye_by_team()
 PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
 PICK_CACHE: dict = {}   # league name -> (timestamp, picks)
-POLL_SECONDS = 4.0
-# Near your turn, staleness costs you clock. Both the server cache and the
-# browser poll tighten when your pick is close: worst-case lag from a pick
-# landing to it showing drops from ~9s to ~3s, which matters on a 30s timer.
-POLL_SECONDS_HOT = 1.5
+POLL_SECONDS = 1.0
+# Near your turn, staleness costs you clock, so both the server cache and the
+# browser poll tighten further when your pick is close. Sleeper answers in
+# ~0.1s and this is one request per second for the league you're looking at --
+# roughly 60/min against a public API that tolerates far more.
+POLL_SECONDS_HOT = 0.5
 HOT_WITHIN = 3          # picks away from your turn
 SIM: dict = {}          # league name -> practice-draft state (see sim_start)
 
@@ -1025,7 +1026,14 @@ async function tick(){
     // loses your cursor every refresh.
     const keep=q?{v:q.value,f:document.activeElement===q,
                   s:q.selectionStart,e:q.selectionEnd}:null;
+    // Carry scroll across the re-render. Without this a refresh snaps the
+    // board back to the top, which at a one-second cadence means you can
+    // never scroll it at all.
+    const sb=document.querySelector('.scrollbox');
+    const sTop=sb?sb.scrollTop:0;
     document.getElementById('app').innerHTML=render(d);
+    const sb2=document.querySelector('.scrollbox');
+    if(sb2&&sTop) sb2.scrollTop=sTop;
     if(keep){const q2=document.getElementById('q');
              if(q2){q2.value=keep.v;
                     if(keep.f){q2.focus();
@@ -1046,7 +1054,7 @@ async function tick(){
  const fast=L&&L.sim&&!L.sim.done;
  const near=L&&L.until!=null&&L.until<=3;   // your pick is imminent
  clearTimeout(window._t);
- window._t=setTimeout(tick,fast?1200:(near?2000:5000));
+ window._t=setTimeout(tick,fast?1000:(near?750:1000));
 }
 tick();
 </script></body></html>"""
