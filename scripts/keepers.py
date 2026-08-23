@@ -18,7 +18,7 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 from ff import board, keepers            # noqa: E402
-from ff.leagues import load_all          # noqa: E402
+from ff.leagues import configured_slot, load_all   # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -136,7 +136,8 @@ def main():
             round_one_keepable=k.get("round_one_keepable", True),
         )
         cands = [c for c in cands if c["position"] not in ("K", "DEF", "DST")]
-        res = keepers.value(cands, rows, L)
+        res = keepers.value(cands, rows, L,
+                            draft_slot=configured_slot(cfg))
 
         path = OUT / f"{L.name}-keepers.md"
         path.write_text(render(L, res, cfg, meta))

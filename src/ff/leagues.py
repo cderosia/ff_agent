@@ -191,3 +191,18 @@ def load_all(path: pathlib.Path | None = None):
         except Exception as e:                      # keep going; report at the end
             errors.append((cfg["name"], str(e)))
     return leagues, errors
+
+
+def configured_slot(cfg: dict) -> int | None:
+    """Draft slot from leagues.yaml, top level or under `manual`.
+
+    Two call sites used to read this two different ways, so a slot set for the
+    draft board was invisible to the keeper maths.
+    """
+    if not cfg:
+        return None
+    top = cfg.get("draft_slot")
+    if top:
+        return int(top)
+    manual = cfg.get("manual") or {}
+    return int(manual["draft_slot"]) if manual.get("draft_slot") else None

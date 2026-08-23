@@ -127,9 +127,15 @@ Late-round ordering leans on `starts.MISS_RATE`, measured over 2018-2025 by
 
 ## Current state
 
-Five leagues configured; all drafts for 2026 are done. The `work` league's pick file is
-partially recorded (manual entry during a live Yahoo draft) and needs reconciling once the
-Yahoo API key lands.
+Five leagues configured. Only **work** has drafted (2026-08-18, Yahoo); its pick file is
+partially recorded from manual entry during the live draft and needs reconciling once the
+Yahoo API key lands. The other four have not drafted and their `draft_datetime` is still
+`not set`.
+
+Draft slots known so far: work 5, freinds-keeper 9, friends 1. Slots live at the top level
+of a league block in `leagues.yaml` and are read through `leagues.configured_slot()` —
+they drive both the live board and keeper valuation, so a missing one silently falls back
+to the middle of the round.
 
 Next up, in Carter's priority order: **week-to-week in-season logic** (lineups, waivers,
 trades on the shared value engine). A guillotine/elimination league variant was scoped and

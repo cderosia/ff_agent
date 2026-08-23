@@ -83,16 +83,44 @@ def value(candidates: list[dict], rows: list[dict], league,
     deepest = max(by_market) if by_market else 0
 
     def pick_number(rd: int) -> int:
-        # Without a known draft slot, assume the middle of the round.
+        """Where your pick in round `rd` actually falls, snaking.
+
+        This used to count straight down every round, which is wrong for half
+        of them: at slot 9 of 10 you pick 9th in odd rounds but 2nd in even
+        ones. A keeper's cost is a ROUND, so the value you give up depends
+        entirely on where that round lands for you -- and at the ends of the
+        order those two picks are nearly a full round apart.
+        """
         slot = draft_slot or (league.teams + 1) / 2
-        return int(round((rd - 1) * league.teams + slot))
+        in_round = slot if rd % 2 else (league.teams - slot + 1)
+        return int(round((rd - 1) * league.teams + in_round))
+
+    # How wide a window around your pick counts as "what that pick gets you".
+    # One exact pick is too brittle: adjacent ADP ranks can differ by a whole
+    # tier, so a keeper's surplus swung 37 points on a three-pick change of
+    # slot. A keeper decision should not turn on which single player happens
+    # to sit on one draft slot months before the draft.
+    WINDOW = 4
 
     def expected_at(rd: int):
+        """(representative player, pick number) for the pick a keeper costs.
+
+        Takes the MEDIAN value across a window of picks around yours, and
+        returns the player closest to that median as the human-readable
+        example. The median is what the surplus is actually measured against.
+        """
         p = pick_number(rd)
-        for q in range(p, deepest + 1):          # next player actually on the board
-            if q in by_market:
-                return by_market[q], p
-        return None, p
+        near = [by_market[q] for q in range(p - WINDOW, p + WINDOW + 1)
+                if q in by_market]
+        if not near:
+            for q in range(p, deepest + 1):
+                if q in by_market:
+                    return by_market[q], p
+            return None, p
+        vals = sorted(r["vorp"] for r in near)
+        med = vals[len(vals) // 2]
+        rep = min(near, key=lambda r: abs(r["vorp"] - med))
+        return {**rep, "vorp": med}, p
 
     out = []
     for c in candidates:

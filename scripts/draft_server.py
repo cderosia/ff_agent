@@ -47,7 +47,7 @@ from ff import draft as draft_mod        # noqa: E402
 from ff import vbd as vbd_mod            # noqa: E402
 from ff import starts as starts_mod      # noqa: E402
 from ff import why as why_mod            # noqa: E402
-from ff.leagues import _env, load_all    # noqa: E402
+from ff.leagues import _env, configured_slot, load_all   # noqa: E402
 from ff.names import key                 # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
@@ -96,9 +96,14 @@ def prepare(leagues, cfgs, proj):
         else:
             me = "me"          # manual entry tags your own picks directly
 
-        slot = (cfg.get("manual") or {}).get("draft_slot")
+        # An explicitly configured slot WINS. The platform is only asked when
+        # leagues.yaml doesn't say. Previously the API answer overwrote the
+        # config unconditionally, so a Sleeper league with no published draft
+        # order silently reset a configured slot to None, and ESPN's stale
+        # order quietly contradicted what the user had told us.
+        slot = configured_slot(cfg)
         try:
-            if L.platform not in ("sleeper", "espn"):
+            if slot or L.platform not in ("sleeper", "espn"):
                 pass
             elif L.platform == "sleeper":
                 d = requests.get(
