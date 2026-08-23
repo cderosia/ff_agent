@@ -48,7 +48,7 @@ from ff import vbd as vbd_mod            # noqa: E402
 from ff import starts as starts_mod      # noqa: E402
 from ff import why as why_mod            # noqa: E402
 from ff.leagues import _env, configured_slot, load_all   # noqa: E402
-from ff.names import key                 # noqa: E402
+from ff.names import key, normalize      # noqa: E402
 from ff.projections import fetch         # noqa: E402
 
 LOCK = threading.Lock()
@@ -118,8 +118,26 @@ def prepare(leagues, cfgs, proj):
         except Exception:
             pass
 
+        # Keepers are already on your roster before pick 1, and the rounds
+        # they cost are picks you no longer hold. Without both, the board
+        # offers you players you own and plans around picks you don't have.
+        keep_cfg = ((cfg.get("keepers") or {}).get("keep")) or []
+        by_norm = {normalize(r["name"]): r for r in rows}
+        keepers_rows, keeper_rounds, missing = [], [], []
+        for k in keep_cfg:
+            row = by_norm.get(normalize(k["name"]))
+            if row is None:
+                missing.append(k["name"])
+                continue
+            keepers_rows.append(row)
+            if k.get("round"):
+                keeper_rounds.append(int(k["round"]))
+        if missing:
+            print(f"  {L.name}: keeper not found on board: {', '.join(missing)}")
+
         CTX[L.name] = {"league": L, "rows": rows, "meta": meta, "me": me,
                        "slot": slot, "rounds": L.starter_slots + L.bench,
+                       "keepers": keepers_rows, "keeper_rounds": keeper_rounds,
                        "id_map": {p["espn_id"]: p for p in proj if p.get("espn_id")}}
         print(f"  {L.name:16} {L.teams:>2}tm {L.platform:8} slot {slot or '?'} "
               f"· {meta['source']}")
@@ -494,10 +512,28 @@ def state_for(name):
         mine = [by_key[key(p["name"], p["position"])] for p in picks
                 if p.get("by") == c["me"] and key(p["name"], p["position"]) in by_key]
 
+    # A keeper is yours and off the board, whether or not the feed says so.
+    # Dedupe: some platforms do record keepers as picks.
+    # Applies in practice too: a rehearsal where the bots can draft your own
+    # keepers isn't rehearsing your draft.
+    keepers_rows = c.get("keepers") or []
+    have = {key(p["name"], p["position"]) for p in mine}
+    for r in keepers_rows:
+        k = key(r["name"], r["position"])
+        taken.add(k)
+        if k not in have:
+            mine.append(r)
+            have.add(k)
+
     on_clock = len(picks) + 1
     slot = sim["slot"] if sim else c["slot"]
     rounds = sim["rounds"] if sim else c["rounds"]
     my_picks = snake_picks_for_slot(slot, L.teams, rounds) if slot else []
+    # Only for the real thing: a 3-round practice draft has no round 10 to lose.
+    spent = set() if sim else set(c.get("keeper_rounds") or [])
+    if spent and slot:
+        my_picks = [p for p in my_picks
+                    if ((p - 1) // L.teams) + 1 not in spent]
     upcoming = [p for p in my_picks if p >= on_clock]
     until = (upcoming[0] - on_clock) if upcoming else None
     gap = (upcoming[1] - upcoming[0]) if len(upcoming) > 1 else L.teams
@@ -541,7 +577,11 @@ def state_for(name):
         "on_clock": on_clock, "until": until, "slot": slot, "npicks": len(picks),
         "gaps": {s: n for s, n in draft_mod.roster_gaps(mine, L).items()
                  if s not in ("K", "DST")},
-        "roster": [{"n": p["name"], "p": p["pos_rank"]} for p in mine],
+        "roster": [{"n": p["name"], "p": p["pos_rank"],
+                    "k": key(p["name"], p["position"])
+                         in {key(r["name"], r["position"]) for r in keepers_rows}}
+                   for p in mine],
+        "keeper_rounds": sorted(spent),
         "recs": [{"n": r["name"], "p": r["pos_rank"], "g": r["marginal"],
                   "v": r["vorp"],
                   "e": dyn.get(key(r["name"], r["position"]), {}).get("dyn_edge"),
@@ -736,7 +776,11 @@ function render(d){
    +`${d.run.of} picks. Get ahead of it or wait it out deliberately.</div>`;
  h+=entry;
  h+=`<div class=card><div class=lbl>your roster (${d.roster.length})</div><div class=roster>`;
- h+= d.roster.length?d.roster.map(r=>`<span>${esc(r.n)} ${pos(r.p)}</span>`).join(''):'<span>—</span>';
+ h+= d.roster.length?d.roster.map(r=>`<span>${esc(r.n)} ${pos(r.p)}`
+   +`${r.k?' <span class=tiertag>KEPT</span>':''}</span>`).join(''):'<span>—</span>';
+ if(d.keeper_rounds&&d.keeper_rounds.length)
+  h+=`<div class=pos style="margin-top:6px">no pick in round `
+   +`${d.keeper_rounds.join(', ')} — spent on keepers</div>`;
  h+=`</div><div style="margin-top:9px">`;
  const g=Object.entries(d.gaps);
  h+= g.length?g.map(([s,n])=>`<span class=need>${esc(s)} ×${n}</span>`).join('')
