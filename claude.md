@@ -132,10 +132,19 @@ partially recorded from manual entry during the live draft and needs reconciling
 Yahoo API key lands. The other four have not drafted and their `draft_datetime` is still
 `not set`.
 
-Draft slots known so far: work 5, freinds-keeper 9, friends 1. Slots live at the top level
-of a league block in `leagues.yaml` and are read through `leagues.configured_slot()` —
-they drive both the live board and keeper valuation, so a missing one silently falls back
-to the middle of the round.
+Draft slots known so far: work 5, freinds-keeper 9, friends 1, family 10; **719 has none
+and needs one**. Slots live at the top level of a league block in `leagues.yaml` and are
+read through `leagues.configured_slot()` — they drive both the live board and keeper
+valuation, so a missing one silently falls back to the middle of the round. A configured
+slot beats the platform's answer, deliberately: ESPN's published order came back empty
+after a draft reset and Sleeper publishes none until a draft opens.
+
+**ESPN drafts cannot be followed through the API.** Verified on a live draft: mDraftDetail
+and mRoster both return `inProgress: true` with zero picks and zero rostered players, then
+every pick the instant it finalises. The draft room's DOM is the only live source, so
+`scripts/espn_draft_bridge.user.js` (Tampermonkey) scrapes it and POSTs to `/ingest`. A
+console snippet cannot do this — Chrome blocks the https->http hop from page context,
+silently. Leagues opt in with `ingest: true`. See `DRAFTDAY.md`.
 
 Next up, in Carter's priority order: **week-to-week in-season logic** (lineups, waivers,
 trades on the shared value engine). A guillotine/elimination league variant was scoped and
