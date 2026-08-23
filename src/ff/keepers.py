@@ -146,6 +146,7 @@ def value(candidates: list[dict], rows: list[dict], league,
             rec.update(
                 vorp=row["vorp"], points=row["points"], vbd_rank=row["vbd_rank"],
                 pos_rank=row["pos_rank"], market_rank=row.get("adp_rank"),
+                adp=row.get("adp"),
                 alt=alt["name"] if alt else None, alt_vorp=alt_vorp,
                 surplus=round(row["vorp"] - alt_vorp, 1), note="",
             )

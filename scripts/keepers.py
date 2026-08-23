@@ -36,6 +36,17 @@ def sleeper_players() -> dict:
     return d
 
 
+
+def rd_pick(overall, teams) -> str:
+    """An overall pick number as round.pick -- '3.04 (24)'."""
+    if not overall:
+        return "—"
+    n = int(round(overall))
+    rd = (n - 1) // teams + 1
+    within = n - (rd - 1) * teams
+    return f"{rd}.{within:02d} ({n})"
+
+
 def render(league, res, cfg, meta) -> str:
     k = cfg["keepers"]
     positive = [r for r in res if (r.get("surplus") or 0) > 0][: k["max"]]
@@ -71,18 +82,30 @@ def render(league, res, cfg, meta) -> str:
     L.append("")
     L.append("## Full evaluation")
     L.append("")
-    L.append("| | player | pos | cost | 2026 vorp | alt at that pick | surplus |")
-    L.append("|:--|---|---|---|---:|---|---:|")
+    L.append("Columns: **costs you** is the pick you surrender to keep him. "
+             "**our board** is where he ranks on this league's own board, as a "
+             "round.pick — our answer to ADP. **market** is where the room "
+             "actually drafts him. Keep him when what you pay is later than "
+             "where he belongs.")
+    L.append("")
+    L.append("| | player | pos | costs you | our board | market | instead you'd get "
+             "| vorp | surplus |")
+    L.append("|:--|---|---|---|---|---|---|---:|---:|")
     for r in res:
         if r.get("surplus") is None:
-            cost_s = f"rd{r['cost_round']}" if r.get('cost_round') else "—"
-            L.append(f"| | {r['name']} | {r['position']} | {cost_s} | — | "
-                     f"_{r['note']}_ | — |")
+            cost_s = (f"rd{r['cost_round']} ({r['pick_number']})"
+                      if r.get('cost_round') and r.get('pick_number')
+                      else (f"rd{r['cost_round']}" if r.get('cost_round') else "—"))
+            L.append(f"| | {r['name']} | {r['position']} | {cost_s} | — | — | "
+                     f"_{r['note']}_ | — | — |")
             continue
         mark = "**KEEP**" if r in positive else ""
         alt = f"{r['alt']} ({max(r['alt_vorp'],0):.0f})" if r["alt"] else "—"
-        L.append(f"| {mark} | {r['name']} | {r['pos_rank']} | rd{r['cost_round']} | "
-                 f"{r['vorp']:.0f} | {alt} | {r['surplus']:+.0f} |")
+        cost = f"rd{r['cost_round']} · {rd_pick(r['pick_number'], league.teams)}"
+        ours = rd_pick(r.get("vbd_rank"), league.teams)
+        mkt = rd_pick(r.get("adp"), league.teams)
+        L.append(f"| {mark} | {r['name']} | {r['pos_rank']} | {cost} | {ours} | "
+                 f"{mkt} | {alt} | {r['vorp']:.0f} | {r['surplus']:+.0f} |")
     L.append("")
     L.append("## Rule assumptions")
     L.append("")
