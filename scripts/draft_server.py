@@ -57,6 +57,11 @@ PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
 PICK_CACHE: dict = {}   # league name -> (timestamp, picks)
 POLL_SECONDS = 4.0
+# Near your turn, staleness costs you clock. Both the server cache and the
+# browser poll tighten when your pick is close: worst-case lag from a pick
+# landing to it showing drops from ~9s to ~3s, which matters on a 30s timer.
+POLL_SECONDS_HOT = 1.5
+HOT_WITHIN = 3          # picks away from your turn
 SIM: dict = {}          # league name -> practice-draft state (see sim_start)
 
 
@@ -182,13 +187,14 @@ def is_manual(name):
     return name in SIM or CTX[name]["league"].platform not in ("sleeper", "espn")
 
 
-def picks_for(name):
+def picks_for(name, hot=False):
     """This league's picks, cached briefly so switching is cheap."""
     if is_manual(name):
         return manual_picks(name)          # local file; no polling
     now = time.time()
+    ttl = POLL_SECONDS_HOT if hot else POLL_SECONDS
     ts, cached = PICK_CACHE.get(name, (0, None))
-    if cached is not None and now - ts < POLL_SECONDS:
+    if cached is not None and now - ts < ttl:
         return cached
     c = CTX[name]
     L = c["league"]
@@ -499,6 +505,15 @@ def state_for(name):
     c = CTX[name]
     L, rows = c["league"], c["rows"]
     picks = picks_for(name)
+    # If that put us within a few picks of your turn, the cached copy is not
+    # good enough -- take the fresh one.
+    slot_now = CTX[name].get("slot")
+    if slot_now and not SIM.get(name):
+        rounds_now = CTX[name]["rounds"]
+        mine_at = snake_picks_for_slot(slot_now, CTX[name]["league"].teams, rounds_now)
+        nxt = next((q for q in mine_at if q >= len(picks) + 1), None)
+        if nxt is not None and nxt - (len(picks) + 1) <= HOT_WITHIN:
+            picks = picks_for(name, hot=True)
     taken = {key(p["name"], p["position"]) for p in picks if p["name"]}
     by_key = {key(r["name"], r["position"]): r for r in rows}
     sim = SIM.get(name)
@@ -954,8 +969,11 @@ async function tick(){
  if(my!==SEQ) return;              // a newer tick owns the schedule now
  // A practice draft moves on a clock, so it needs a much tighter poll than a
  // draft board that is just watching a feed.
- const fast=window._last&&window._last.sim&&!window._last.sim.done;
- clearTimeout(window._t);window._t=setTimeout(tick,fast?1200:5000);
+ const L=window._last;
+ const fast=L&&L.sim&&!L.sim.done;
+ const near=L&&L.until!=null&&L.until<=3;   // your pick is imminent
+ clearTimeout(window._t);
+ window._t=setTimeout(tick,fast?1200:(near?2000:5000));
 }
 tick();
 </script></body></html>"""
