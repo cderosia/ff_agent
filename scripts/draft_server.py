@@ -935,30 +935,43 @@ function render(d){
   h+=`</ol></div>`;
  }
 
- // Two starting slots live off the main board on purpose. Surface them while
- // there is still time to fill them, and shout once there isn't.
+ // Two starting slots live off the main board on purpose. You won't draft
+ // either until the end, so this stays out of the way until it matters, then
+ // moves to the top. The threshold is how many slots you still need: with two
+ // holes and two rounds left, every remaining pick is spoken for.
+ let lateCard='', lateLine='';
  if(d.late){
-  const tight = d.rounds_left!=null && d.rounds_left <= d.late.need.length+1;
-  h+=`<div class="card late${tight?' urgent':''}"><div class=lbl>`
-   +`still need ${d.late.need.join(' + ')}`
-   +(d.rounds_left!=null?` · ${d.rounds_left} round${d.rounds_left==1?'':'s'} left`:'')
-   +`</div>`;
-  if(d.late.dst.length){
-   h+=`<div class=pos style="margin-bottom:4px">best defenses by projected points, weeks 1-3 — a streaming slot, not a season</div><table>`;
-   for(const x of d.late.dst)
-    h+=`<tr><td>${esc(x.name)}</td><td class=num>${x.pts}</td>`
-     +`<td class=opp>${esc(x.opps.join(', '))}</td></tr>`;
-   h+=`</table>`;
+  const need=d.late.need, left=d.rounds_left;
+  const promote = left!=null && left <= need.length;
+  const urgent  = left!=null && left <  need.length;
+  const hdr=`still need ${need.join(' + ')}`
+    +(left!=null?` · ${left} round${left==1?'':'s'} left`:'');
+  if(promote){
+   lateCard=`<div class="card late${urgent?' urgent':''}"><div class=lbl>${hdr}</div>`;
+   if(d.late.dst.length){
+    lateCard+=`<div class=pos style="margin-bottom:4px">best defenses by projected`
+     +` points, weeks 1-3 — a streaming slot, not a season</div><table>`;
+    for(const x of d.late.dst)
+     lateCard+=`<tr><td>${esc(x.name)}</td><td class=num>${x.pts}</td>`
+      +`<td class=opp>${esc(x.opps.join(', '))}</td></tr>`;
+    lateCard+=`</table>`;
+   }
+   if(d.late.k.length){
+    lateCard+=`<div class=pos style="margin:6px 0 4px">kickers</div><table>`;
+    for(const x of d.late.k)
+     lateCard+=`<tr><td>${esc(x.n||x.name)} <span class=pos>${esc(x.team||'')}</span></td>`
+      +`<td class=num>${x.pts==null?'—':x.pts}</td></tr>`;
+    lateCard+=`</table>`;
+   }
+   lateCard+=`</div>`;
+  } else {
+   // Just a footnote until then, so you can't forget they exist.
+   lateLine=`<div class="card late"><div class=lbl>${hdr}</div>`
+    +`<div class=pos>the shortlist appears here when you're `
+    +`${need.length} round${need.length==1?'':'s'} out</div></div>`;
   }
-  if(d.late.k.length){
-   h+=`<div class=pos style="margin:6px 0 4px">kickers</div><table>`;
-   for(const x of d.late.k)
-    h+=`<tr><td>${esc(x.name)} <span class=pos>${esc(x.team||'')}</span></td>`
-     +`<td class=num>${x.pts==null?'—':x.pts}</td></tr>`;
-   h+=`</table>`;
-  }
-  h+=`</div>`;
  }
+ h+=lateCard;
 
  if(d.wait&&Object.keys(d.wait).length){
   h+=`<div class="card wait"><div class=lbl>cost of waiting — best now vs. your next pick</div><table>`;
@@ -1011,7 +1024,7 @@ function render(d){
  h+= d.gone.length?d.gone.map(r=>`<span>${esc(r.n)} ${pos(r.p)}</span>`).join(''):'<span>—</span>';
  h+=`</div></div><div class=card><div class=lbl>last picks</div><div class=gone>`;
  h+= d.last.map(r=>`<span>${r.no}. ${esc(r.n)} ${pos(r.p)}</span>`).join('')||'<span>—</span>';
- return h+`</div></div>`;
+ return h+`</div></div>`+lateLine;
 }
 let POOL=[];let FILTER='ALL';
 function setf(p){FILTER=p;const d=window._last;if(d)document.getElementById('app').innerHTML=render(d);}
