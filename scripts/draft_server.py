@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from ff import board as board_mod        # noqa: E402
 from ff import draft as draft_mod        # noqa: E402
 from ff import vbd as vbd_mod            # noqa: E402
+from ff import special as special_mod    # noqa: E402
 from ff import starts as starts_mod      # noqa: E402
 from ff import why as why_mod            # noqa: E402
 from ff.leagues import _env, configured_slot, load_all   # noqa: E402
@@ -150,6 +151,13 @@ def prepare(leagues, cfgs, proj):
                        "slot": slot, "rounds": L.starter_slots + L.bench,
                        "keepers": keepers_rows, "keeper_rounds": keeper_rounds,
                        "ingest": bool(cfg.get("ingest")),
+                       # K and DST are kept off the main board on purpose (see
+                       # ff.special), but a board that omits two starting slots
+                       # is how you reach the last round with neither filled.
+                       "dst": (special_mod.dst_early(3)
+                               if L.starters.get("DST") else []),
+                       "kickers": (special_mod.kickers(proj, L)[:12]
+                                   if L.starters.get("K") else []),
                        "id_map": {p["espn_id"]: p for p in proj if p.get("espn_id")}}
         print(f"  {L.name:16} {L.teams:>2}tm {L.platform:8} slot {slot or '?'} "
               f"· {meta['source']}")
@@ -557,6 +565,41 @@ def positional_run(picks, window=8):
     return {"pos": pos, "n": n, "of": len(recent)} if n >= len(recent) * 0.5 else None
 
 
+DST_POS = {"DEF", "DST", "D/ST"}
+
+
+def late_needs(name, picks, mine_raw):
+    """Kickers and defenses still available, and whether you still need one."""
+    c = CTX[name]
+    L = c["league"]
+    taken_txt = " | ".join((p.get("name") or "") for p in picks).upper()
+
+    def gone(label, team=None, nick=None):
+        # Match on the nickname ("RAMS"), which shows up whether the feed says
+        # "Los Angeles Rams", "LAR D/ST" or "Rams D/ST". Team codes do not.
+        if nick and len(nick) > 3 and nick.upper() in taken_txt:
+            return True
+        if team and f"{team.upper()} " in taken_txt:
+            return True
+        return label.upper() in taken_txt
+
+    have_dst = any((p.get("position") or "").upper() in DST_POS for p in mine_raw)
+    have_k = any((p.get("position") or "").upper() == "K" for p in mine_raw)
+
+    dst = [d for d in c.get("dst") or []
+           if not gone(d["name"], d["team"], d.get("nick"))][:6]
+    ks = [k for k in c.get("kickers") or [] if not gone(k["name"])][:6]
+    need = []
+    if L.starters.get("DST") and not have_dst:
+        need.append("DST")
+    if L.starters.get("K") and not have_k:
+        need.append("K")
+    if not need:
+        return None
+    return {"need": need, "dst": dst if "DST" in need else [],
+            "k": ks if "K" in need else []}
+
+
 def state_for(name):
     c = CTX[name]
     L, rows = c["league"], c["rows"]
@@ -630,6 +673,8 @@ def state_for(name):
                        or 10**6) + on_clock - 1 < horizon),
                   key=lambda r: dyn[key(r["name"], r["position"])]["dyn_adp_rank"])[:10]
 
+    mine_raw = [p for p in picks if p.get("by") == c["me"]]
+    late = late_needs(name, picks, mine_raw)
     tiers = {pos: tier_breaks([r for r in avail], pos, dyn)
              for pos in ("QB", "RB", "WR", "TE")}
     tier_of = {t["n"]: t for rows_ in tiers.values() for t in rows_}
@@ -653,6 +698,8 @@ def state_for(name):
                          in {key(r["name"], r["position"]) for r in keepers_rows}}
                    for p in mine],
         "keeper_rounds": sorted(spent),
+        "late": late,
+        "rounds_left": max(0, rounds - ((on_clock - 1) // L.teams + 1)),
         "bridge": ({"age": round(time.time() - INGEST_TS[name])}
                    if c.get("ingest") and name in INGEST_TS
                    else ({"age": None} if c.get("ingest") else None)),
@@ -758,6 +805,10 @@ cursor:pointer;font-size:12px;color:var(--dim)}
 .case .nm{font-weight:700}
 .case .rz{color:var(--dim);display:block;font-size:13px;margin-top:1px;
 white-space:normal}
+.late{background:#221a10;border-color:#4a3a18}
+.late.urgent{background:#2a1416;border-color:#5b2027}
+.late td{padding:3px 6px}
+.late .opp{color:var(--dim);font-size:12px}
 .wait table{font-size:13px}
 .wait .cost{color:var(--bad);font-weight:700}
 .wait .cheap{color:var(--go)}
@@ -882,6 +933,31 @@ function render(d){
    h+=`<li><span class=nm>${esc(t.n)}</span> ${pos(t.p)}`
     +`<span class=rz>${esc(t.why)}</span></li>`;
   h+=`</ol></div>`;
+ }
+
+ // Two starting slots live off the main board on purpose. Surface them while
+ // there is still time to fill them, and shout once there isn't.
+ if(d.late){
+  const tight = d.rounds_left!=null && d.rounds_left <= d.late.need.length+1;
+  h+=`<div class="card late${tight?' urgent':''}"><div class=lbl>`
+   +`still need ${d.late.need.join(' + ')}`
+   +(d.rounds_left!=null?` · ${d.rounds_left} round${d.rounds_left==1?'':'s'} left`:'')
+   +`</div>`;
+  if(d.late.dst.length){
+   h+=`<div class=pos style="margin-bottom:4px">best defenses by projected points, weeks 1-3 — a streaming slot, not a season</div><table>`;
+   for(const x of d.late.dst)
+    h+=`<tr><td>${esc(x.name)}</td><td class=num>${x.pts}</td>`
+     +`<td class=opp>${esc(x.opps.join(', '))}</td></tr>`;
+   h+=`</table>`;
+  }
+  if(d.late.k.length){
+   h+=`<div class=pos style="margin:6px 0 4px">kickers</div><table>`;
+   for(const x of d.late.k)
+    h+=`<tr><td>${esc(x.name)} <span class=pos>${esc(x.team||'')}</span></td>`
+     +`<td class=num>${x.pts==null?'—':x.pts}</td></tr>`;
+   h+=`</table>`;
+  }
+  h+=`</div>`;
  }
 
  if(d.wait&&Object.keys(d.wait).length){
