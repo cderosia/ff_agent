@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import json
 import pathlib
 import random
@@ -54,6 +55,9 @@ from ff.projections import fetch         # noqa: E402
 
 LOCK = threading.Lock()
 INGEST_TS = {}
+KEEPER_CACHE = {}
+# Keepers can be declared any time before a draft, so refresh on a slow timer.
+KEEPER_TTL = 60.0
 BYES = starts_mod.bye_by_team()
 PICKS_DIR = ROOT / "data" / "manual_picks"
 CTX: dict = {}          # league name -> prepared board + identity
@@ -568,6 +572,45 @@ def positional_run(picks, window=8):
 DST_POS = {"DEF", "DST", "D/ST"}
 
 
+@functools.lru_cache(maxsize=1)
+def players_blob():
+    """Sleeper's player dictionary, for turning keeper ids into names.
+
+    Read from the cached pull rather than fetched: it's 16MB, it barely
+    changes, and draft day is the wrong time to download it.
+    """
+    path = ROOT / "data" / "raw" / "sleeper_players.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def league_keepers(name):
+    """Other managers' declared keepers, cached — they can be set any time.
+
+    Refreshed on a slow timer rather than at startup: a manager declaring a
+    keeper an hour before the draft would otherwise never reach a board that
+    was already running.
+    """
+    c = CTX[name]
+    L = c["league"]
+    if L.platform != "sleeper":
+        return []
+    now = time.time()
+    ts, cached = KEEPER_CACHE.get(name, (0, None))
+    if cached is not None and now - ts < KEEPER_TTL:
+        return cached
+    try:
+        out = draft_mod.sleeper_keepers(L.league_id, players_blob())
+    except Exception:
+        out = cached or []          # a failed refresh must not empty the board
+    KEEPER_CACHE[name] = (now, out)
+    return out
+
+
 def special_pool(name, picks, mine_raw):
     """Kickers and defenses still available, plus which you still need.
 
@@ -633,7 +676,18 @@ def state_for(name):
     # Dedupe: some platforms do record keepers as picks.
     # Applies in practice too: a rehearsal where the bots can draft your own
     # keepers isn't rehearsing your draft.
-    keepers_rows = c.get("keepers") or []
+    keepers_rows = list(c.get("keepers") or [])
+    # Keepers declared on the platform by ANY manager. Yours land on your
+    # roster; everyone else's simply leave the board.
+    board_by_key = {key(r["name"], r["position"]): r for r in rows}
+    for k in league_keepers(name):
+        row = board_by_key.get(key(k["name"], k["position"]))
+        if row is None:
+            continue
+        if c.get("me") and str(k.get("owner_id")) == str(c["me"]):
+            keepers_rows.append(row)
+        else:
+            taken.add(key(row["name"], row["position"]))
     have = {key(p["name"], p["position"]) for p in mine}
     for r in keepers_rows:
         k = key(r["name"], r["position"])

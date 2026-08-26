@@ -54,6 +54,41 @@ def sleeper_picks(draft_id: str) -> list[dict]:
     return sorted(out, key=lambda x: x["pick_no"])
 
 
+def sleeper_keepers(league_id: str, players_blob: dict | None = None) -> list[dict]:
+    """Players other managers have declared as keepers, so they leave the board.
+
+    A keeper is off the board before a single pick is made, but our only source
+    of "who is gone" is the pick feed -- which is empty until the draft opens.
+    Without this the board spends the early rounds recommending players nobody
+    can actually draft.
+
+    Sleeper exposes declarations on the roster (`keepers`, a list of player
+    ids). It is None until a manager sets theirs, so this returns nothing in a
+    league where nobody has declared yet, which is the honest answer rather
+    than a guess.
+
+    NOTE: whether Sleeper also injects keeper picks into the draft feed when the
+    draft opens is unverified -- no keeper draft has run since this was written.
+    This path is correct either way: a keeper that arrives twice is deduped by
+    the caller, and one that never arrives is still removed.
+    """
+    r = requests.get(f"{SLEEPER}/league/{league_id}/rosters", timeout=20)
+    r.raise_for_status()
+    blob = players_blob or {}
+    out = []
+    for roster in r.json():
+        for pid in (roster.get("keepers") or []):
+            pl = blob.get(str(pid)) or {}
+            name = pl.get("full_name") or " ".join(
+                x for x in (pl.get("first_name"), pl.get("last_name")) if x)
+            if not name:
+                continue
+            out.append({"name": name, "position": pl.get("position"),
+                        "owner_id": roster.get("owner_id"),
+                        "roster_id": roster.get("roster_id")})
+    return out
+
+
 def espn_picks(league_id: str, cookies: dict, id_to_player: dict) -> list[dict]:
     url = (f"{ESPN}/seasons/2026/segments/0/leagues/{league_id}?view=mDraftDetail")
     r = requests.get(url, headers=UA, cookies=cookies, timeout=20)
