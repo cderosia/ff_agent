@@ -50,13 +50,18 @@ from bakeoff import draft, weekly_score          # noqa: E402
 from ff import board as board_mod                # noqa: E402
 from ff import starts as starts_mod              # noqa: E402
 from ff.leagues import load_all                  # noqa: E402
+from ff.names import normalize                   # noqa: E402
 from ff.projections import fetch                 # noqa: E402
+
+import yaml                                      # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("league")
     ap.add_argument("--seeds", type=int, default=25)
+    ap.add_argument("--no-keepers", action="store_true",
+                    help="ignore keepers declared in leagues.yaml")
     args = ap.parse_args()
 
     leagues, _ = load_all()
@@ -68,11 +73,31 @@ def main():
     byes = starts_mod.bye_by_team()
     rounds = L.starter_slots + L.bench
 
+    keepers, keeper_rounds = [], []
+    if not args.no_keepers:
+        cfgs = {c["name"]: c for c in yaml.safe_load(
+            (ROOT / "leagues" / "leagues.yaml").read_text())["leagues"]}
+        by_norm = {normalize(r["name"]): r for r in rows}
+        for k in ((cfgs.get(L.name, {}).get("keepers") or {}).get("keep") or []):
+            row = by_norm.get(normalize(k["name"]))
+            if row is not None:
+                keepers.append(row)
+                if k.get("round"):
+                    keeper_rounds.append(int(k["round"]))
+
     print(f"\n{L.name}: {L.teams} teams, {rounds} rounds, "
-          f"{args.seeds} drafts per slot\n")
+          f"{args.seeds} drafts per slot")
+    if keepers:
+        print(f"  keeping {', '.join(k['pos_rank'] + ' ' + k['name'] for k in keepers)}")
+        print(f"  no pick in round{'s' if len(keeper_rounds)>1 else ''} "
+              f"{', '.join(map(str, sorted(keeper_rounds)))}")
+    print()
     res = {}
     for slot in range(1, L.teams + 1):
-        scores = [weekly_score(draft(L, rows, slot, "board", seed), L, byes)
+        scores = [weekly_score(
+                      draft(L, rows, slot, "board", seed,
+                            keepers=keepers, keeper_rounds=keeper_rounds),
+                      L, byes)
                   for seed in range(args.seeds)]
         res[slot] = scores
         print(f"  slot {slot} done", flush=True)

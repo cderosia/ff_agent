@@ -62,7 +62,15 @@ def weekly_score(roster, league, byes) -> float:
     return total
 
 
-def draft(league, rows, slot, strategy, seed) -> list[dict]:
+def draft(league, rows, slot, strategy, seed,
+          keepers=None, keeper_rounds=None) -> list[dict]:
+    """One team's draft from `slot`. Keepers start on the roster and cost picks.
+
+    A keeper changes two things at once: he's already yours (so he's off the
+    board and filling a lineup slot from pick 1), and the round he costs is a
+    pick you no longer make. Both matter for what a slot is worth -- losing
+    round 5 hurts differently at the turn than in the middle.
+    """
     rnd = random.Random(seed)
     rounds = league.starter_slots + league.bench
     order = (sorted([r for r in rows if r.get("adp")], key=lambda r: r["adp"])
@@ -73,6 +81,14 @@ def draft(league, rows, slot, strategy, seed) -> list[dict]:
     picks = sorted(mine_at)
     caps = draft_mod.roster_max(league)
     taken, mine = set(), []
+    for k in (keepers or []):
+        mine.append(k)
+        taken.add(key(k["name"], k["position"]))
+    if keeper_rounds:
+        spent = set(keeper_rounds)
+        mine_at = {p for p in mine_at
+                   if ((p - 1) // league.teams) + 1 not in spent}
+        picks = sorted(mine_at)
 
     for pk in range(1, rounds * league.teams + 1):
         if pk in mine_at:
