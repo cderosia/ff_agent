@@ -12,6 +12,29 @@ The number that matters is not the mean, it's the mean against the spread.
 Slot effects are small and draft variance is large, so this reports the
 standard error and says plainly when the slots are inside the noise -- which
 is the usual answer, and a more useful one than a confident fake ranking.
+
+WHAT DECIDES IT: team count, and only team count. Measured by holding roster
+shape fixed and swapping team count, in both directions:
+
+    719 settings      8 teams   slot 1 is  -6.5 vs the middle   middle-heavy
+    719 settings     10 teams   slot 1 is +20.2 vs the middle   top-heavy
+    friends settings 10 teams   slot 1 is +26.1 vs the middle   top-heavy
+    friends settings  8 teams   slot 1 is  -2.8 vs the middle   middle-heavy
+
+An earlier guess that roster shape drove it -- 719 starts 11 with a 5-man
+bench, so nearly every pick must become a starter -- was wrong: give 719 ten
+teams and it goes top-heavy anyway.
+
+With 8 teams a round consumes only 8 players, the pool stays deep relative to
+demand, and the man at the turn is still good; the gain from pick 1 over pick 8
+is small, so the 15-pick gaps at the ends dominate and the middle wins. With 10
+teams two more elite players leave every round, the drop across round 1
+steepens, and holding an elite player outweighs the gaps -- even though those
+gaps are LONGER at 19 picks. The talent gradient beats the schedule.
+
+It is also asymmetric: the middle edge at 8 teams is 3-7 points and borderline
+noise, the top edge at 10 teams is 20-26 and solid. So at 10+ take the earliest
+slot offered; at 8 take the middle but don't pay for it.
 """
 from __future__ import annotations
 
