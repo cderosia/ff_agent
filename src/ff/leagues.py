@@ -206,6 +206,7 @@ def load_yahoo(cfg: dict) -> League:
         waiver_note=m.get("waiver_note", "FAB budget"),
         draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),
         raw={"yahoo": True, "league_key": s["league_key"],
+             "draft_status": s.get("draft_status"),
              "guillotine": s["guillotine"], "start_week": s["start_week"],
              "end_week": s["end_week"], "current_week": s["current_week"],
              "faab_budget": int(m.get("faab_budget") or 0),

@@ -166,3 +166,17 @@ def opponent_of(league, week: int, teams: list[Team]) -> Team | None:
         oid = _sleeper_opponent(league, week, teams)
         return next((t for t in teams if t.team_id == oid), None)
     return None                           # ESPN/Yahoo matchups: not needed yet
+
+
+def has_drafted(league, teams: list[Team]) -> bool:
+    """Whether this league's CURRENT season has actually drafted.
+
+    Roster contents alone can't answer it. A keeper league carries last
+    season's rosters straight through the offseason, so `freinds-keeper` looks
+    fully rostered in August while its 2026 draft hasn't happened -- and odds
+    computed off those rosters describe a team that no longer exists.
+    """
+    status = (league.raw.get("status") or league.raw.get("draft_status") or "")
+    if str(status).lower() in ("pre_draft", "predraft", "predraftready"):
+        return False
+    return any(t.players for t in teams)

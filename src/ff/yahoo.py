@@ -121,6 +121,7 @@ def league_settings(league_key: str) -> dict:
         "end_week": int(meta.get("end_week") or 17),
         "current_week": int(meta.get("current_week") or 1),
         "uses_faab": str(s.get("uses_faab", 0)) == "1",
+        "draft_status": meta.get("draft_status"),
         "waiver_day": s.get("waiver_rule"),
     }
 
