@@ -22,7 +22,7 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
-from ff import board, draft, weekly            # noqa: E402
+from ff import board, draft, lineup, rosters, weekly, winprob            # noqa: E402
 from ff.leagues import load_all                # noqa: E402
 from ff.names import key                       # noqa: E402
 from ff.projections import fetch               # noqa: E402
@@ -46,28 +46,48 @@ def build(L, cfg, season, week, live):
     rows, _ = board.build(proj, L)
     by_key = {key(r["name"], r["position"]): r for r in rows}
 
-    # my roster
-    rs = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/rosters",
-                      timeout=30).json()
-    me = next((r for r in rs if r.get("owner_id") == cfg.get("owner_id")), None)
-    my_ids = (me or {}).get("players") or []
+    # Every team's roster, from whichever platform this league lives on. Win
+    # probability needs the whole field, not just yours.
+    all_teams = rosters.all_teams(L, week, blob)
+    me_team = next((t for t in all_teams if t.mine), None)
     mine = []
-    for pid in my_ids:
-        n, pos = player_name(blob, pid)
-        r = by_key.get(key(n, pos))
+    for p in (me_team.players if me_team else []):
+        r = by_key.get(key(p["name"], p["position"]))
         if r:
             mine.append(r)
 
-    taken_ids = set()
-    for r in rs:
-        taken_ids |= set(r.get("players") or [])
-    taken = set()
-    for pid in taken_ids:
-        n, pos = player_name(blob, pid)
-        taken.add(key(n, pos))
+    taken = {key(p["name"], p["position"])
+             for t in all_teams for p in t.players}
 
-    # usage, strictly from weeks before the target week
-    trend = weekly.usage_trend(season, week - 1)
+    # Usage, strictly from weeks before the target week. In week 1 there is no
+    # such data -- no games have been played -- so the waiver half of the
+    # report stands down rather than failing. The odds half still works, and a
+    # week-1 report that says "no usage yet" is more useful than no report.
+    try:
+        trend = weekly.usage_trend(season, week - 1)
+    except Exception as e:
+        trend = None
+        usage_note = (f"No usage data yet for {season} week {week} — "
+                      f"waiver targets need at least one completed week.")
+    else:
+        usage_note = None
+    if trend is None:
+        cands, movers, tmap = [], [], {}
+        drops = sorted(mine, key=lambda r: r["vorp"])[:5]
+        gaps = {s: c for s, c in draft.roster_gaps(mine, L).items()
+                if s not in ("K", "DST")}
+        total = int(L.raw.get("faab_budget") or 0)
+        odds = None
+        try:
+            wpts = lineup.weekly_points(week, L.scoring)
+            opp = rosters.opponent_of(L, week, all_teams)
+            odds = winprob.league_odds(all_teams, wpts, L, opponent=opp, week=week)
+        except Exception as e:
+            odds = {"error": f"{type(e).__name__}: {e}"}
+        return dict(mine=mine, cands=cands, movers=movers, drops=drops, tmap=tmap,
+                    budget_left=total, total=total, gaps=gaps, odds=odds,
+                    teams=all_teams, usage_note=usage_note)
+
     trend["k"] = [key(n, p) for n, p in zip(trend.player_display_name, trend.position)]
     ppg = weekly.recent_points(season, week - 1, L.scoring)
     trend["ppg"] = trend.k.map(ppg).fillna(0.0)
@@ -105,12 +125,61 @@ def build(L, cfg, season, week, live):
     # drop candidates: rostered players contributing least
     drops = sorted(mine, key=lambda r: r["vorp"])[:5]
 
-    budget = (me or {}).get("settings", {}).get("waiver_budget_used", 0)
-    total = (L.raw.get("settings") or {}).get("waiver_budget", 100)
+    total = int(L.raw.get("faab_budget")
+                or (L.raw.get("settings") or {}).get("waiver_budget", 0) or 0)
+    spent = 0
+    if L.platform == "sleeper" and me_team:
+        rs = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/rosters",
+                          timeout=30).json()
+        r = next((x for x in rs if str(x.get("roster_id")) == me_team.team_id), None)
+        spent = ((r or {}).get("settings") or {}).get("waiver_budget_used", 0)
     gaps = {s: c for s, c in draft.roster_gaps(mine, L).items()
             if s not in ("K", "DST")}      # not modelled; drafted off-list
+    odds = None
+    try:
+        wpts = lineup.weekly_points(week, L.scoring)
+        opp = rosters.opponent_of(L, week, all_teams)
+        odds = winprob.league_odds(all_teams, wpts, L, opponent=opp, week=week)
+        if odds and odds.get("mode") == "guillotine":
+            _price_survival(cands[:12], me_team, all_teams, wpts, L, week,
+                            odds, total - spent)
+    except Exception as e:                      # a report is worth more than a stat
+        odds = {"error": f"{type(e).__name__}: {e}"}
+
     return dict(mine=mine, cands=cands, movers=movers, drops=drops, tmap=tmap,
-                budget_left=total - budget, total=total, gaps=gaps)
+                budget_left=total - spent, total=total, gaps=gaps,
+                odds=odds, teams=all_teams)
+
+
+def _price_survival(cands, me_team, all_teams, wpts, L, week, odds, budget_left):
+    """In an elimination league, a claim is worth the survival it buys.
+
+    Points added is the wrong currency here: an extra six points means nothing
+    if you were clearing the cut anyway, and everything if you weren't. So each
+    candidate is re-run through the same simulation with him in the lineup, and
+    priced on the survival probability he actually adds.
+
+    The bid is budget x survival bought, which is a heuristic and labelled as
+    one -- but it has the right shape. Budget is worth nothing after you are
+    eliminated, so a player who moves survival meaningfully is worth a large
+    slice of it, and one who moves it not at all is worth a minimum bid however
+    good he looks.
+    """
+    from ff.rosters import Team
+    base = odds.get("advance", 0.0)
+    others = [t for t in all_teams if not t.mine]
+    for c in cands:
+        added = Team(team_id=me_team.team_id, name=me_team.name, mine=True,
+                     players=me_team.players + [{"name": c["name"],
+                                                 "position": c["position"],
+                                                 "team": None}])
+        try:
+            r = winprob.league_odds(others + [added], wpts, L, week=week)
+            c["d_survive"] = round(r.get("advance", base) - base, 4)
+        except Exception:
+            c["d_survive"] = None
+        if c["d_survive"] is not None:
+            c["bid"] = max(1, int(round(budget_left * max(0.0, c["d_survive"]))))
 
 
 def render_tuesday(L, d, season, week, live):
@@ -125,11 +194,66 @@ def render_tuesday(L, d, season, week, live):
                (", ".join(f"{s}×{c}" for s, c in d["gaps"].items()) or "starters full"))
     out.append("")
 
+    o = d.get("odds") or {}
+    if o.get("error"):
+        out.append(f"> odds unavailable this week — {o['error']}")
+        out.append("")
+    elif o.get("mode") == "guillotine":
+        adv = o["advance"]
+        out.append("## Survival")
+        out.append("")
+        out.append(f"**{adv:.0%} chance you advance** this week "
+                   f"({o['eliminated']:.0%} eliminated). Projected "
+                   f"**{o['projected_rank']} of {o['of']}** at "
+                   f"{o['mine']['proj']} pts.")
+        out.append("")
+        out.append(f"Cushion over the low team: **{o['median_cushion']:+.0f}** in a "
+                   f"median week, **{o['cushion_10th_pct']:+.0f}** in a bad one. "
+                   f"The second number is the one that matters — it's what happens "
+                   f"when your projections come in low.")
+        out.append("")
+        out.append("| | team | proj | sd |")
+        out.append("|:--|---|---:|---:|")
+        for t in o["teams"]:
+            out.append(f"| {'**you**' if t['mine'] else ''} | {t['team']} "
+                       f"| {t['proj']} | {t['sd']} |")
+        out.append("")
+        out.append("_Odds come from your league's scoring, not the platform's: every "
+                   "team's best legal lineup, each player's spread measured from "
+                   "2019-2025 week-to-week variance, simulated 40,000 times. "
+                   "Players are treated as independent, so a stacked lineup is a "
+                   "little wilder than this says._")
+        out.append("")
+    elif o.get("mode") == "head_to_head" and o.get("win") is not None:
+        out.append("## This week")
+        out.append("")
+        out.append(f"**{o['win']:.0%} to win** vs {o['opponent']} — "
+                   f"{o['mine']['proj']} to {o['opponent_proj']}.")
+        out.append("")
+    elif o.get("mode") == "field":
+        out.append("## This week")
+        out.append("")
+        out.append(f"Projected **{o['projected_rank']} of {o['of']}** at "
+                   f"{o['mine']['proj']} pts · "
+                   f"{o['beat_median']:.0%} to beat a median team.")
+        out.append("")
+
+    if d.get("usage_note"):
+        out.append(f"> {d['usage_note']}")
+        out.append("")
+
     out.append("## Claim these")
     out.append("")
     out.append("Ranked by what they add to *your* starting lineup, not by raw upside — "
                "a great player at a position you've already filled is worth nothing this week.")
     out.append("")
+    if any(c.get("d_survive") is not None for c in d["cands"][:12]):
+        out.append("In an elimination league a claim is worth the **survival** it "
+                   "buys, not the points: six more points is worthless if you were "
+                   "clearing the cut anyway. Suggested bids are that survival gain "
+                   "times your remaining budget — a heuristic, but the right shape, "
+                   "since budget is worth nothing after you're out.")
+        out.append("")
     useful = [c for c in d["cands"] if c["gain"] > 0]
     if not useful:
         out.append("_Nothing on the wire improves your starting lineup. "
