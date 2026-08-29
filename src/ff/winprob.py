@@ -100,3 +100,81 @@ def survive_elimination(teams: list[tuple[float, float]], me: int,
         "median_cushion": round(worst_margin[len(worst_margin) // 2], 1),
         "cushion_10th_pct": round(worst_margin[len(worst_margin) // 10], 1),
     }
+
+
+# ---------------------------------------------------------------------------
+# League-wide odds
+# ---------------------------------------------------------------------------
+def project_team(team, week_pts: dict, league, week: int | None = None
+                 ) -> tuple[float, float, list]:
+    """(mean, sd, starters) for one team's best legal lineup this week.
+
+    Scored under YOUR league's rules, not the platform's. That's the whole
+    point: the same roster is worth different numbers in a 6-point-passing-TD
+    half-PPR league than in the platform's generic view, and the platform's
+    own projection can't tell you about a league it isn't scoring.
+    """
+    from .lineup import optimize
+    from .names import key as nkey
+
+    from .special import dst_week
+    dsts = dst_week(week) if week else {}
+
+    pool = []
+    for p in team.players:
+        pos = (p.get("position") or "").upper()
+        if pos in ("DEF", "DST", "D/ST"):
+            # Defenses are absent from the weekly blend; take them from the
+            # same source ff.special uses for the draft board.
+            pts = dsts.get((p.get("team") or "").upper(), 0.0)
+            pool.append({**p, "position": "DST", "week_points": pts})
+            continue
+        pts, *_ = week_pts.get(nkey(p["name"], p["position"]), (0.0, 0, 0.0))
+        pool.append({**p, "week_points": pts})
+    filled, _bench = optimize(pool, league)
+    starters = [p for slot in filled.values() for p in slot]
+    mu, sd = team_distribution(starters)
+    return mu, sd, starters
+
+
+def league_odds(teams, week_pts: dict, league, opponent=None,
+                week: int | None = None) -> dict:
+    """Your odds this week: head-to-head, or survival in a guillotine league."""
+    dists, mine_i = [], None
+    detail = []
+    for i, t in enumerate(teams):
+        mu, sd, starters = project_team(t, week_pts, league, week=week)
+        dists.append((mu, sd))
+        detail.append({"team": t.name, "mine": t.mine, "proj": round(mu, 1),
+                       "sd": round(sd, 1), "n_starters": len(starters)})
+        if t.mine:
+            mine_i = i
+    if mine_i is None:
+        return {"error": "couldn't identify your team"}
+
+    out = {"teams": sorted(detail, key=lambda d: -d["proj"]),
+           "mine": detail[mine_i]}
+    if league.raw.get("guillotine"):
+        out["mode"] = "guillotine"
+        out.update(survive_elimination(dists, mine_i))
+        # Rank 1 = highest projection, in every mode. Ranking ascending here
+        # made last place read as first, which is the worst possible direction
+        # to get backwards in an elimination league.
+        ranked = sorted(range(len(dists)), key=lambda i: -dists[i][0])
+        out["projected_rank"] = ranked.index(mine_i) + 1
+        out["of"] = len(dists)
+    elif opponent is not None:
+        j = next((i for i, t in enumerate(teams) if t.team_id == opponent.team_id), None)
+        out["mode"] = "head_to_head"
+        out["opponent"] = opponent.name
+        out["opponent_proj"] = round(dists[j][0], 1) if j is not None else None
+        out["win"] = head_to_head(dists[mine_i], dists[j]) if j is not None else None
+    else:
+        # No matchup available -- still useful to know where you stand.
+        out["mode"] = "field"
+        ranked = sorted(range(len(dists)), key=lambda i: -dists[i][0])
+        out["projected_rank"] = ranked.index(mine_i) + 1
+        out["of"] = len(dists)
+        out["beat_median"] = head_to_head(
+            dists[mine_i], sorted(dists, key=lambda d: -d[0])[len(dists) // 2])
+    return out

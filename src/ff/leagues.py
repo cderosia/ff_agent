@@ -103,7 +103,9 @@ def load_sleeper(cfg: dict) -> League:
         scoring=sleeper_scoring_to_canonical(d.get("scoring_settings")),
         starters=starters, bench=bench,
         draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),
-        raw=d,
+        # owner_id rides along so downstream can tell which roster is yours;
+        # the Sleeper league payload alone never says.
+        raw={**d, "owner_id": cfg.get("owner_id")},
     )
 
 

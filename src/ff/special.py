@@ -91,3 +91,30 @@ def kickers(projections: list[dict], league) -> list[dict]:
             k["pts"] = None
         return out
     return sorted(out, key=lambda k: -(k["pts"] or 0))
+
+
+@functools.lru_cache(maxsize=32)
+def dst_week(week: int, season: int = SEASON) -> dict:
+    """{team code: projected points} for defenses in one week.
+
+    The weekly blend that drives lineups and win probability carries no
+    defenses at all, so every team's DST scored 0 and every projection ran
+    about a defense light. That washes out when comparing teams -- everyone
+    starts one -- but it understates absolute totals, and in a guillotine
+    league the absolute number is what decides who goes home.
+    """
+    try:
+        r = requests.get(SLEEPER_PROJ.format(yr=season, wk=week, pos="DEF"),
+                         headers=UA, timeout=20)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception:
+        return {}
+    out = {}
+    for x in rows:
+        team = x.get("team")
+        st = x.get("stats") or {}
+        pts = st.get("pts_half_ppr", st.get("pts_std"))
+        if team and pts is not None:
+            out[team.upper()] = float(pts)
+    return out
