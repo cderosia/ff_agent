@@ -150,8 +150,111 @@ st.sidebar.info(
 # ---------------------------------------------------------------------------
 # tabs
 # ---------------------------------------------------------------------------
-t_board, t_lineup, t_waiver, t_trade, t_keep, t_report = st.tabs(
-    ["Board", "Lineup", "Waivers", "Trades", "Keepers", "Report"])
+(t_sunday, t_watch, t_board, t_lineup, t_waiver, t_trade,
+ t_keep, t_report) = st.tabs(
+    ["Sunday", "Watch", "Board", "Lineup", "Waivers", "Trades",
+     "Keepers", "Report"])
+
+
+# ---------------------------------------------------------------------------
+# Sunday + Watch are cross-league on purpose: your Sunday isn't organised by
+# league, it's organised by which games are on.
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=30, show_spinner=False)
+def _games(week: int):
+    from ff import live
+    return live.games(week=week, season=2026)
+
+
+@st.cache_data(ttl=120, show_spinner="reading your rosters…")
+def _holdings(week: int):
+    from ff import live
+    from ff.leagues import load_all as _la
+    ls, _ = _la()
+    return live.my_holdings(ls, week, get_blob())
+
+
+def _default_week() -> int:
+    ls, _ = leagues_objects()          # returns (leagues, errors)
+    for l in ls:
+        w = l.raw.get("current_week")
+        if w:
+            return int(w)
+    return 1
+
+
+# ---- Sunday ---------------------------------------------------------------
+with t_sunday:
+    from ff import live as live_mod
+    st.header("Sunday")
+    c1, c2, c3 = st.columns([1, 1, 3])
+    wk = int(c1.number_input("Week", 1, 18, _default_week(), key="sun_wk"))
+    if c2.button("Refresh now", key="sun_refresh"):
+        _games.clear(); _holdings.clear()
+    st.caption("Scores refresh every 30 seconds. Your players are pulled from "
+               "every league that has drafted, so one game can matter to you "
+               "several times over.")
+
+    try:
+        gs = _games(wk)
+        hold = _holdings(wk)
+    except Exception as e:
+        st.error(f"couldn't load live data: {type(e).__name__}: {e}")
+        gs, hold = [], {}
+
+    if not hold:
+        st.info("No drafted leagues yet — nothing to follow.")
+    live_now = [g for g in gs if g["state"] == "in"]
+    if live_now:
+        st.subheader(f"In progress ({len(live_now)})")
+    for g in (live_now or gs):
+        mine_here = hold.get(g["home"], []) + hold.get(g["away"], [])
+        if not mine_here and g["state"] != "in":
+            continue
+        head = (f"**{g['away']} {g['away_score']} — {g['home_score']} {g['home']}**"
+                if g["state"] != "pre" else
+                f"**{g['away']} @ {g['home']}**")
+        st.markdown(f"{head}  ·  {g['detail']}  ·  {g['network']}")
+        if mine_here:
+            st.dataframe(
+                [{"player": h["player"], "pos": h["position"],
+                  "league": h["league"],
+                  "role": "START" if h["starter"] else "bench",
+                  "proj": h["proj"]} for h in
+                 sorted(mine_here, key=lambda h: (not h["starter"], -h["proj"]))],
+                hide_index=True, width="stretch")
+        st.divider()
+
+
+# ---- Watch ----------------------------------------------------------------
+with t_watch:
+    from ff import live as live_mod
+    st.header("What to put on")
+    st.caption("Games ranked by how much of your season is actually in them. "
+               "A starter counts double a bench player, and a player you roster "
+               "in three leagues counts three times — because he is three times "
+               "as much of your afternoon.")
+    wk2 = int(st.number_input("Week", 1, 18, _default_week(), key="watch_wk"))
+    try:
+        ranked = live_mod.watch_ranking(_games(wk2), _holdings(wk2))
+    except Exception as e:
+        st.error(f"{type(e).__name__}: {e}")
+        ranked = []
+
+    if not ranked:
+        st.info("No games involve your players yet.")
+    for i, g in enumerate(ranked, 1):
+        best = "🥇 " if i == 1 else ""
+        st.markdown(
+            f"### {best}{g['away']} @ {g['home']}  ·  {g['network']}\n"
+            f"{live_mod.kickoff_local(g['kickoff'])} · "
+            f"**{g['n_players']} of your players** "
+            f"({g['n_starters']} starting)")
+        st.dataframe(
+            [{"role": "START" if h["starter"] else "bench", "player": h["player"],
+              "pos": h["position"], "proj": h["proj"], "league": h["league"],
+              "team": h["nfl_team"]} for h in g["players"]],
+            hide_index=True, width="stretch")
 
 
 # ---- Board ----------------------------------------------------------------
