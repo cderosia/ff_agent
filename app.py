@@ -230,31 +230,38 @@ with t_sunday:
 with t_watch:
     from ff import live as live_mod
     st.header("What to put on")
-    st.caption("Games ranked by how much of your season is actually in them. "
-               "A starter counts double a bench player, and a player you roster "
-               "in three leagues counts three times — because he is three times "
-               "as much of your afternoon.")
+    st.caption("One pick per time slot — you can only watch one game at a time. "
+               "Starters only: a bench player's points aren't yours this week. "
+               "A player you roster in three leagues counts three times. Ties go "
+               "to projected points.")
     wk2 = int(st.number_input("Week", 1, 18, _default_week(), key="watch_wk"))
     try:
-        ranked = live_mod.watch_ranking(_games(wk2), _holdings(wk2))
+        slots = live_mod.watch_by_slot(_games(wk2), _holdings(wk2))
     except Exception as e:
         st.error(f"{type(e).__name__}: {e}")
-        ranked = []
+        slots = []
 
-    if not ranked:
-        st.info("No games involve your players yet.")
-    for i, g in enumerate(ranked, 1):
-        best = "🥇 " if i == 1 else ""
+    if not slots:
+        st.info("No games have your starters in them yet.")
+    for s_ in slots:
+        g = s_["pick"]
+        st.subheader(s_["slot"])
         st.markdown(
-            f"### {best}{g['away']} @ {g['home']}  ·  {g['network']}\n"
-            f"{live_mod.kickoff_local(g['kickoff'])} · "
-            f"**{g['n_players']} of your players** "
-            f"({g['n_starters']} starting)")
+            f"**{g['away']} @ {g['home']}** on **{g['network']}** — "
+            f"{g['n_players']} starter{'s' if g['n_players'] != 1 else ''}, "
+            f"{g['proj_total']} projected points")
         st.dataframe(
-            [{"role": "START" if h["starter"] else "bench", "player": h["player"],
-              "pos": h["position"], "proj": h["proj"], "league": h["league"],
-              "team": h["nfl_team"]} for h in g["players"]],
+            [{"player": h["player"], "pos": h["position"], "proj": h["proj"],
+              "league": h["league"], "team": h["nfl_team"]} for h in g["players"]],
             hide_index=True, width="stretch")
+        if s_["others"]:
+            with st.expander(f"other games this slot ({len(s_['others'])})"):
+                st.dataframe(
+                    [{"game": f"{o['away']} @ {o['home']}", "on": o["network"],
+                      "starters": o["n_players"], "proj": o["proj_total"]}
+                     for o in s_["others"]],
+                    hide_index=True, width="stretch")
+        st.divider()
 
 
 # ---- Board ----------------------------------------------------------------

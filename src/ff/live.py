@@ -77,28 +77,80 @@ def kickoff_local(iso: str | None) -> str:
         return iso
 
 
-def watch_ranking(games_list: list[dict], holdings: dict) -> list[dict]:
-    """Rank games by how much of YOUR season is actually in them.
+def watch_ranking(games_list: list[dict], holdings: dict,
+                  starters_only: bool = True) -> list[dict]:
+    """Games with your players in them, most of your season first.
 
-    `holdings` maps NFL team -> list of {player, league, starter}. A starter is
-    worth more than a bench player because he is the one whose points you keep,
-    and the same player rostered in three leagues counts three times -- that is
-    genuinely three times as much of your Sunday riding on him.
+    Starters only by default: a bench player's points are not yours this week,
+    so he is not a reason to put a game on. The same player rostered in three
+    leagues counts three times -- that is genuinely three times as much riding
+    on him.
     """
     out = []
     for g in games_list:
         involved = []
         for side in ("home", "away"):
             for h in holdings.get(g[side], []):
+                if starters_only and not h.get("starter"):
+                    continue
                 involved.append({**h, "nfl_team": g[side]})
         if not involved:
             continue
-        starters = sum(1 for h in involved if h.get("starter"))
-        score = starters * 2 + (len(involved) - starters)
-        out.append({**g, "players": sorted(
-            involved, key=lambda h: (not h.get("starter"), h["player"])),
-            "n_players": len(involved), "n_starters": starters, "watch_score": score})
-    return sorted(out, key=lambda g: (-g["watch_score"], g["kickoff"] or ""))
+        out.append({**g, "players": sorted(involved, key=lambda h: -h["proj"]),
+                    "n_players": len(involved),
+                    "proj_total": round(sum(h["proj"] for h in involved), 1)})
+    # Ties on headcount are broken by projected points -- two starters worth 30
+    # is a better watch than two worth 12.
+    return sorted(out, key=lambda g: (-g["n_players"], -g["proj_total"]))
+
+
+def slot_label(iso: str | None) -> str:
+    if not iso:
+        return "TBD"
+    try:
+        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except Exception:
+        return iso
+    return t.strftime("%a %-I:%M %p")
+
+
+def _slot_key(iso: str | None):
+    """Games kicking off in the same hour are the same slot (4:05 and 4:25)."""
+    if not iso:
+        return ("zzz", 0)
+    try:
+        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except Exception:
+        return (iso, 0)
+    return (t.strftime("%Y-%m-%d"), t.hour)
+
+
+def watch_by_slot(games_list: list[dict], holdings: dict,
+                  starters_only: bool = True) -> list[dict]:
+    """One recommendation per time slot, because you can only watch one at a time.
+
+    A single ranking for the whole week is the wrong shape: the best game
+    Sunday afternoon tells you nothing about what to put on Sunday night. So
+    games are grouped into their kickoff slot and ranked within it, and each
+    slot names its own pick.
+    """
+    ranked = watch_ranking(games_list, holdings, starters_only)
+    # Keep slots that have no holdings out entirely, but remember every game in
+    # a slot we do care about, so "nothing of yours is on" stays visible.
+    slots: dict = {}
+    for g in ranked:
+        slots.setdefault(_slot_key(g["kickoff"]), []).append(g)
+    out = []
+    for k in sorted(slots):
+        gs = slots[k]
+        out.append({
+            "slot": slot_label(gs[0]["kickoff"]),
+            "kickoff": gs[0]["kickoff"],
+            "pick": gs[0],
+            "others": gs[1:],
+            "n_games": len(gs),
+        })
+    return out
 
 
 @functools.lru_cache(maxsize=64)
