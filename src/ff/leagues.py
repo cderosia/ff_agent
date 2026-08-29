@@ -170,8 +170,49 @@ def load_manual(cfg: dict) -> League:
     )
 
 
+def load_yahoo(cfg: dict) -> League:
+    """Read a Yahoo league live, falling back to hand-entered settings.
+
+    Yahoo's OAuth API is still gated for this account, but its own frontend
+    reads from a cookie-authenticated mirror -- see ff.yahoo. That gives real
+    settings instead of typed-in ones, which matters: `work` was configured by
+    hand as a 10-team league and is actually 16, and team count sets every
+    replacement level in the engine.
+
+    Falls back to `manual:` if the session has expired, so a stale cookie
+    degrades to the old behaviour rather than taking the league offline -- but
+    it says so, because silently using settings that are known to be wrong is
+    worse than a loud failure.
+    """
+    from . import yahoo
+    key = cfg.get("league_key") or f"nfl.l.{cfg['league_id']}"
+    try:
+        s = yahoo.league_settings(key)
+    except Exception as e:
+        if (cfg.get("manual") or {}).get("scoring"):
+            print(f"  {cfg['name']}: Yahoo read failed ({type(e).__name__}); "
+                  f"falling back to hand-entered settings in leagues.yaml")
+            return load_manual(cfg)
+        raise
+
+    m = cfg.get("manual") or {}
+    style = "faab" if s["uses_faab"] else m.get("waiver_style", "priority")
+    return League(
+        name=cfg["name"], platform="yahoo", league_id=str(cfg["league_id"]),
+        teams=s["teams"], scoring=s["scoring"], starters=s["starters"],
+        bench=s["bench"], waiver_style=style,
+        waiver_note=m.get("waiver_note", "FAB budget"),
+        draft_datetime=cfg.get("draft_datetime", ""), notes=cfg.get("notes", ""),
+        raw={"yahoo": True, "league_key": s["league_key"],
+             "guillotine": s["guillotine"], "start_week": s["start_week"],
+             "end_week": s["end_week"], "current_week": s["current_week"],
+             "faab_budget": int(m.get("faab_budget") or 0),
+             **{k: v for k, v in m.items() if k in ("draft_slot", "waiver_day")}},
+    )
+
+
 LOADERS = {"sleeper": load_sleeper, "espn": load_espn,
-           "yahoo": load_manual, "manual": load_manual}
+           "yahoo": load_yahoo, "manual": load_manual}
 
 
 def load_all(path: pathlib.Path | None = None):
