@@ -21,7 +21,8 @@ ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from ff import board as board_mod          # noqa: E402
+from ff import board as board_mod
+from ff import rosters as rosters_mod          # noqa: E402
 from ff import draft as draft_mod          # noqa: E402
 from ff import keepers as keeper_mod       # noqa: E402
 from ff import trades as trade_mod         # noqa: E402
@@ -309,9 +310,7 @@ with t_lineup:
                "league's rules. Players who are out or on bye are excluded from the "
                "lineup, not just flagged.")
 
-    if L.platform != "sleeper" or not cfg.get("owner_id"):
-        st.info("Lineups currently read Sleeper rosters only.")
-    else:
+    if True:
         from ff import lineup as lineup_mod
         c1, c2 = st.columns([1, 3])
         lp_replay = c1.toggle("Replay a past week", value=True, key="lp_rep")
@@ -320,7 +319,7 @@ with t_lineup:
 
         blob = get_blob()
         by_key = {key(r["name"], r["position"]): r for r in rows}
-        mine, _ = trade_mod.league_rosters(league_id, blob, by_key, cfg.get("owner_id"))
+        mine, _ = rosters_mod.board_rosters(L, by_key, wk, blob)
 
         if not mine:
             st.info("No roster yet — this fills in after your draft.")
@@ -390,8 +389,8 @@ with t_waiver:
     st.caption(f"**{L.waiver_note}.** No FAAB in any of your leagues — the cost of a "
                "claim is your waiver position, so the call is claim, wait, or skip.")
 
-    if L.platform != "sleeper":
-        st.info("Waiver analysis currently reads Sleeper rosters only. "
+    if False:   # cross-platform now; kept as a switch if a platform regresses
+        st.info("Waiver analysis needs rosters this platform isn't returning. "
                 "ESPN wiring is still to do.")
     else:
         replay = st.toggle("Replay last season (real data — rosters are empty preseason)",
@@ -409,23 +408,18 @@ with t_waiver:
             trend["ppg"] = trend.k.map(ppg).fillna(0.0)
 
             by_key = {key(r["name"], r["position"]): r for r in rows}
-            taken_ids = weekly_mod.rostered(league_id)
-            taken = set()
-            for pid in taken_ids:
-                p = blob.get(pid) or {}
-                taken.add(key(f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                              p.get("position")))
-            import requests
-            rs = requests.get(
-                f"https://api.sleeper.app/v1/league/{league_id}/rosters", timeout=30).json()
-            mine_r = next((r for r in rs if r.get("owner_id") == cfg.get("owner_id")), {})
+            # Cross-platform: who is rostered anywhere, and which are mine.
+            all_t = rosters_mod.all_teams(L, week, blob)
+            taken = {key(pl["name"], pl.get("position"))
+                     for t in all_t for pl in t.players}
             mine = []
-            for pid in mine_r.get("players") or []:
-                p = blob.get(pid) or {}
-                row = by_key.get(key(f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                                     p.get("position")))
-                if row:
-                    mine.append(row)
+            for t in all_t:
+                if not t.mine:
+                    continue
+                for pl in t.players:
+                    row = by_key.get(key(pl["name"], pl.get("position")))
+                    if row:
+                        mine.append(row)
 
             heat = {} if replay else weekly_mod.heat_rank(blob)
             base = draft_mod.lineup_value(mine, L, L.replacement)
@@ -473,15 +467,12 @@ with t_waiver:
 # ---- Trades ---------------------------------------------------------------
 with t_trade:
     st.header("Trades")
-    if L.platform != "sleeper":
-        st.info("Trade search currently reads Sleeper rosters only.")
+    if False:   # cross-platform now
+        st.info("Trade search needs rosters this platform isn't returning.")
     else:
-        replay = st.toggle("Replay last season's rosters", value=True, key="tr")
-        league_id = L.raw.get("previous_league_id") if replay else L.league_id
         blob = get_blob()
         by_key = {key(r["name"], r["position"]): r for r in rows}
-        mine, others = trade_mod.league_rosters(league_id, blob, by_key,
-                                                cfg.get("owner_id"))
+        mine, others = rosters_mod.board_rosters(L, by_key, 1, blob)
         if not mine:
             st.info("No roster yet — this fills in after your draft.")
         else:

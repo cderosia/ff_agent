@@ -180,3 +180,30 @@ def has_drafted(league, teams: list[Team]) -> bool:
     if str(status).lower() in ("pre_draft", "predraft", "predraftready"):
         return False
     return any(t.players for t in teams)
+
+
+def board_rosters(league, by_key: dict, week: int = 1, blob: dict | None = None
+                  ) -> tuple[list, list]:
+    """Every team's roster as BOARD ROWS. Returns (mine, [other teams]).
+
+    Drop-in replacement for the Sleeper-only trades.league_rosters, which is
+    why the Lineup, Waivers and Trades tabs only ever worked on one platform.
+    Players with no board row -- kickers, defenses, anyone missing from the
+    projections -- are dropped, exactly as before.
+    """
+    from .names import key as nkey
+
+    teams = all_teams(league, week, blob)
+    mine, others = [], []
+    for t in teams:
+        rows = []
+        for p in t.players:
+            r = by_key.get(nkey(p["name"], p.get("position")))
+            if r:
+                rows.append(r)
+        if t.mine:
+            mine = rows
+        else:
+            others.append({"roster_id": t.team_id, "owner": t.team_id,
+                           "name": t.name, "players": rows})
+    return mine, others
