@@ -198,12 +198,22 @@ def fetch_fftoday(max_age_hours: int = 12, force: bool = False) -> list[dict]:
         if (time.time() - cached.stat().st_mtime) / 3600 < max_age_hours:
             return json.loads(cached.read_text())
 
+    # FFToday rate-limits: some positions answer 200 and others 403 in the same
+    # sweep. Raising on the first 403 threw away every position already
+    # collected AND the cache, silently dropping the blend from three sources
+    # to two with nothing on screen to say so. Keep what we got, and fall back
+    # to the cache rather than returning nothing.
     out = []
+    failed = []
     for (pos, pid), cols in FFTODAY_COLS.items():
         for page in range(4):                      # paginates 50/page
-            r = requests.get(FFTODAY.format(yr=SEASON, pid=pid, pg=page),
-                             headers=UA, timeout=45)
-            r.raise_for_status()
+            try:
+                r = requests.get(FFTODAY.format(yr=SEASON, pid=pid, pg=page),
+                                 headers=UA, timeout=45)
+                r.raise_for_status()
+            except Exception as e:
+                failed.append(f"{pos}p{page}")
+                break
             found = 0
             for chunk in re.split(r"<TR[ >]", r.text, flags=re.I)[1:]:
                 if not _LINK.search(chunk):
@@ -228,7 +238,17 @@ def fetch_fftoday(max_age_hours: int = 12, force: bool = False) -> list[dict]:
             if found < 50:                         # last page for this position
                 break
 
-    cached.write_text(json.dumps(out))
+    if failed:
+        prev = json.loads(cached.read_text()) if cached.exists() else []
+        if len(out) < len(prev):
+            print(f"  fftoday: {len(failed)} request(s) refused "
+                  f"({', '.join(failed[:4])}) — keeping {len(prev)} cached rows "
+                  f"over {len(out)} fresh ones")
+            return prev
+        print(f"  fftoday: {len(failed)} request(s) refused; "
+              f"kept {len(out)} rows from the rest")
+    if out:
+        cached.write_text(json.dumps(out))
     return out
 
 
