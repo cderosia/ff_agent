@@ -26,7 +26,6 @@
 
   // ESPN leagueId -> the name in leagues.yaml. Add a line per league.
   const LEAGUES = {
-    "1994120": "testdraft",
     "779624":  "family",
     "371699":  "friends",
   };
