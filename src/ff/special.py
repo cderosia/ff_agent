@@ -75,22 +75,51 @@ def dst_early(weeks: int = 3, season: int = SEASON) -> list[dict]:
 
 
 def kickers(projections: list[dict], league) -> list[dict]:
-    """Kickers, scored under the league's rules where it publishes any."""
+    """Kickers, scored under the league's rules as closely as the data allows.
+
+    Three cases, and the returned `basis` says which one you got:
+
+      "league"       the league publishes made-FG buckets that line up with
+                     ESPN's projection, so this is a real scoring of it
+      "approx"       the league scores by FG DISTANCE (Sleeper's fgm_yds) while
+                     ESPN reports only buckets. Bucket midpoints are used --
+                     30, 45 and 53 yards -- which is an approximation, but a
+                     far better ordering than the alternative
+      "unscored"     nothing usable; ESPN's own order, which is not a ranking
+
+    Before this, every Sleeper league fell through to "unscored" and the kicker
+    list was just whatever order the source happened to return.
+    """
     from .stats import score
+    sc = league.scoring
+    per_yard = sc.get("fg_yds", 0.0)
+    bucketed = any(k.startswith("fg_made") for k in sc)
+
     out = []
     for p in projections:
         if p.get("position") != "K":
             continue
-        pts = score(p.get("stats") or {}, league.scoring)
+        st = p.get("stats") or {}
+        if bucketed:
+            pts, basis = score(st, sc), "league"
+        elif per_yard:
+            # ESPN gives counts per bucket; distance scoring needs yards, so
+            # take the midpoint of each band.
+            pts = (st.get("fg_made_0_39", 0) * 30 * per_yard
+                   + st.get("fg_made_40_49", 0) * 45 * per_yard
+                   + st.get("fg_made_50", 0) * 53 * per_yard
+                   + st.get("xp_made", 0) * sc.get("xp_made", 1.0)
+                   + st.get("fg_missed", 0) * sc.get("fg_missed", 0.0))
+            basis = "approx"
+        else:
+            pts, basis = None, "unscored"
         out.append({"name": p["name"], "team": p.get("team"),
-                    "pts": round(pts, 1)})
-    # Leagues that publish no kicker scoring score everyone 0; fall back to the
-    # source's own order rather than presenting a meaningless tie.
-    if out and all(k["pts"] == 0 for k in out):
-        for i, k in enumerate(out):
-            k["pts"] = None
-        return out
-    return sorted(out, key=lambda k: -(k["pts"] or 0))
+                    "pts": round(pts, 1) if pts is not None else None,
+                    "basis": basis})
+    if any(k["pts"] for k in out):
+        out.sort(key=lambda k: -(k["pts"] or 0))
+    return out
+
 
 
 @functools.lru_cache(maxsize=32)

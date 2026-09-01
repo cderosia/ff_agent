@@ -643,6 +643,7 @@ def special_pool(name, picks, mine_raw):
     if L.starters.get("K") and not have_k:
         need.append("K")
     return {"need": need, "dst": dst, "k": ks,
+            "k_basis": (ks[0].get("basis") if ks else None),
             "slots": [x for x in ("DST", "K") if L.starters.get(x)]}
 
 
@@ -881,7 +882,9 @@ text-decoration:underline}
 .f{padding:4px 12px;border-radius:14px;background:#1b2130;border:1px solid var(--line);
 cursor:pointer;font-size:12px;color:var(--dim)}
 .f.on{background:var(--acc);color:#0b1020;border-color:var(--acc);font-weight:700}
-.scrollbox{height:252px;overflow-y:auto;overscroll-behavior:contain}
+/* Tall enough to scan without scrolling: ~18 rows. Capped against the
+   viewport so it still fits a laptop screen with the cards above it. */
+.scrollbox{height:min(600px,58vh);overflow-y:auto;overscroll-behavior:contain}
 .scrollbox::-webkit-scrollbar{width:9px}
 .scrollbox::-webkit-scrollbar-thumb{background:#2f3846;border-radius:5px}
 .tierrow td{border-top:1px dashed #39445699}
@@ -1070,8 +1073,16 @@ function render(d){
       +` favourable September, not a season. Source's own scoring, not your`
       +` league's.</div>`
     : FILTER==='K'
-    ? `<div class=legend><b>season projection</b>, scored under your league's`
-      +` rules where it publishes any. Take one in the last round.</div>`
+    ? `<div class=legend><b>season projection</b>`
+      +(d.late&&d.late.k_basis==='approx'
+        ? `, approximated: this league scores field goals by DISTANCE and the`
+          +` projection only gives made-FG bands, so band midpoints (30/45/53`
+          +` yards) are used. Good for ordering, not for exact totals.`
+        : d.late&&d.late.k_basis==='league'
+        ? `, scored under this league's own kicker rules.`
+        : `. This league publishes no kicker scoring, so this is the source's`
+          +` own order, not a ranking.`)
+      +` Take one in the last round.</div>`
     : `<div class=legend>ranked by <b>what this pick is worth to your lineup</b>`
   +`, then by <b>expected season points</b> (starts x value over a streamer)`
   +` once your starters are full`
@@ -1135,10 +1146,7 @@ function render(d){
     +`<td class=num>${c}</td></tr>`;}
   h+=`</table></div>`;}
 
- h+=`<div class=card><div class=lbl>value — falling past their price</div><table>`;
- for(const r of d.value)
-  h+=`<tr><td>${esc(r.n)} ${pos(r.p)}</td><td class=num>mkt ${r.m}</td><td class=num>${sg(r.e)}</td></tr>`;
- h+=`</table></div><div class=card><div class=lbl>gone before your next pick</div><div class=gone>`;
+ h+=`<div class=card><div class=lbl>gone before your next pick</div><div class=gone>`;
  h+= d.gone.length?d.gone.map(r=>`<span>${esc(r.n)} ${pos(r.p)}</span>`).join(''):'<span>—</span>';
  h+=`</div></div><div class=card><div class=lbl>last picks</div><div class=gone>`;
  h+= d.last.map(r=>`<span>${r.no}. ${esc(r.n)} ${pos(r.p)}</span>`).join('')||'<span>—</span>';

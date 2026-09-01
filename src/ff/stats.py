@@ -59,6 +59,20 @@ SLEEPER_STAT = {
     "rec_2pt": "rec_2pt",
     "fum_lost": "fum_lost",
     "fum": "fumbles",
+    # Kickers. Sleeper scores field goals by DISTANCE (fgm_yds, points per
+    # yard) where ESPN's projection only reports made-FG buckets, so these
+    # can't be scored directly -- ff.special approximates from bucket
+    # midpoints. Carried through anyway so the league's real rules are
+    # visible rather than absent.
+    "fgm_yds": "fg_yds",
+    "xpm": "xp_made",
+    "xpmiss": "xp_missed",
+    "fgmiss": "fg_missed",
+    "fgm_0_19": "fg_made_0_19",
+    "fgm_20_29": "fg_made_20_29",
+    "fgm_30_39": "fg_made_30_39",
+    "fgm_40_49": "fg_made_40_49",
+    "fgm_50p": "fg_made_50",
 }
 
 # ESPN lineup slot id -> slot name
