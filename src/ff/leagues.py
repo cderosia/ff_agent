@@ -218,6 +218,35 @@ LOADERS = {"sleeper": load_sleeper, "espn": load_espn,
            "yahoo": load_yahoo, "manual": load_manual}
 
 
+def apply_overrides(L: League, cfg: dict) -> League:
+    """Patch settings the platform hasn't caught up with yet.
+
+    A league votes to change something in August and the site isn't updated
+    until days before the draft -- but every number in this repo keys off
+    starters and team count, so drafting against stale settings is drafting
+    against the wrong replacement levels entirely. `overrides:` in leagues.yaml
+    wins over whatever the platform says, and is announced on load so it can
+    never quietly outlive the change it was compensating for.
+    """
+    ov = cfg.get("overrides") or {}
+    if not ov:
+        return L
+    changed = []
+    if "starters" in ov:
+        L.starters = {k: int(v) for k, v in ov["starters"].items()}
+        changed.append(f"starters={L.starters}")
+    if "bench" in ov:
+        L.bench = int(ov["bench"]); changed.append(f"bench={L.bench}")
+    if "teams" in ov:
+        L.teams = int(ov["teams"]); changed.append(f"teams={L.teams}")
+    if "scoring" in ov:
+        L.scoring = {**L.scoring, **{k: float(v) for k, v in ov["scoring"].items()}}
+        changed.append("scoring patched")
+    L.notes = (L.notes + " | OVERRIDDEN: " + ", ".join(changed)).strip(" |")
+    print(f"  {L.name}: using overrides from leagues.yaml — {', '.join(changed)}")
+    return L
+
+
 def load_all(path: pathlib.Path | None = None):
     """Load every configured league. Returns (leagues, errors)."""
     path = path or ROOT / "leagues" / "leagues.yaml"
@@ -231,7 +260,7 @@ def load_all(path: pathlib.Path | None = None):
             errors.append((cfg["name"], f"no loader for platform '{cfg['platform']}'"))
             continue
         try:
-            leagues.append(loader(cfg))
+            leagues.append(apply_overrides(loader(cfg), cfg))
         except Exception as e:                      # keep going; report at the end
             errors.append((cfg["name"], str(e)))
     return leagues, errors

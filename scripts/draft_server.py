@@ -646,6 +646,28 @@ def special_pool(name, picks, mine_raw):
             "slots": [x for x in ("DST", "K") if L.starters.get(x)]}
 
 
+def next_open_pick(picks) -> int:
+    """The lowest pick number nobody has taken.
+
+    Not len(picks)+1. A keeper league starts with its keepers already sitting
+    in the draft at scattered slots -- Sleeper injects them as real picks, so
+    freinds-keeper opens with 39 picks at numbers like 10, 25, 35 while the
+    draft itself has not begun. Counting them said pick 40 when the answer was
+    pick 1, which would have made every derived number -- whose turn it is,
+    when you are up, what survives to your next pick -- wrong all night.
+
+    Falls back to counting when picks carry no numbers, which is the manual
+    entry case.
+    """
+    nums = {p.get("pick_no") for p in picks if p.get("pick_no")}
+    if not nums:
+        return len(picks) + 1
+    n = 1
+    while n in nums:
+        n += 1
+    return n
+
+
 def state_for(name):
     c = CTX[name]
     L, rows = c["league"], c["rows"]
@@ -696,7 +718,7 @@ def state_for(name):
             mine.append(r)
             have.add(k)
 
-    on_clock = len(picks) + 1
+    on_clock = next_open_pick(picks)
     slot = sim["slot"] if sim else c["slot"]
     rounds = sim["rounds"] if sim else c["rounds"]
     my_picks = snake_picks_for_slot(slot, L.teams, rounds) if slot else []
