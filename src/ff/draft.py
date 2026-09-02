@@ -254,6 +254,42 @@ def _expected_best(pool: list[dict], league, roster: list[dict], repl: dict,
     return exp
 
 
+def _enforce_dominance(out: list[dict]) -> list[dict]:
+    """A player can only outrank one who is better for your lineup if he is
+    also likelier to disappear.
+
+    The lookahead exists to price TIMING: when two players are close, prefer
+    the one who won't last. It was never meant to reverse a large value gap,
+    and it did -- ranking Ja'Marr Chase (lineup +113) above Bijan Robinson
+    (+137) when BOTH were 100% certain to be gone by the next pick. With equal
+    survival there is no timing information to add, so the ordering came
+    entirely from an artefact: leaving a position unfilled inflates the
+    apparent value of your next pick, because the empty slot gets counted
+    again. Played out over 20 drafts, taking Bijan was worth +16 points.
+
+    So: sort by plan as before, then repair any pair where a strictly better,
+    no-more-available player sits lower. Cheap, stable, and it leaves genuine
+    cliff decisions -- where survival really does differ -- untouched.
+    """
+    def gone(r):
+        g = r.get("gone_pct")
+        return 100.0 if g is None else float(g)
+
+    changed = True
+    passes = 0
+    while changed and passes < len(out):
+        changed = False
+        passes += 1
+        for i in range(len(out) - 1):
+            a, b = out[i], out[i + 1]
+            better = (b.get("marginal") or 0) - (a.get("marginal") or 0)
+            # b is worth more to the lineup, and is no likelier to survive
+            if better > 0.5 and gone(b) >= gone(a) - 1e-9:
+                out[i], out[i + 1] = b, a
+                changed = True
+    return out
+
+
 def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
               limit: int = 12, next_pick: int | None = None,
               following_pick: int | None = None, depth: int = 40,
@@ -344,6 +380,7 @@ def recommend(rows: list[dict], league, taken: set, my_players: list[dict],
         row["next_best"] = None
         row["plan"] = row["marginal"] - 1e6
     out.sort(key=lambda r: (-r["plan"], -r["bench_val"], -r["own_gap"]))
+    out = _enforce_dominance(out)
     for row in out[depth:]:
         row["plan"] = None
     return out[:limit]
