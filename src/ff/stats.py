@@ -36,6 +36,16 @@ ESPN_STAT = {
     85: "fg_missed",
     86: "xp_made",
     88: "xp_missed",
+    # ESPN publishes made-FG-under-40 under a SECOND id as well, and some
+    # leagues score only that one: the family league awards 5 points on 198 and
+    # nothing on 74, so leaving it unmapped silently dropped every short field
+    # goal and understated its kickers by about a point and a half a week.
+    # Verified equal, not assumed -- in the raw payload 198/199/200 carry byte
+    # identical values to 74/75/76 (Brandon Aubrey, week 1: both 0.307496245)
+    # and appear on kickers only. Mapping both to one canonical name is safe
+    # because a stat line is a dict: the second write overwrites with the same
+    # number rather than double counting it.
+    198: "fg_made_0_39",
 }
 
 # ---------------------------------------------------------------------------

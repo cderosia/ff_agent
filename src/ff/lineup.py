@@ -77,16 +77,31 @@ def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 6,
 
 
 def sleeper_weekly(week: int, max_age_hours: int = 6, force: bool = False) -> dict:
-    """{(name,pos): stat_line} from Sleeper/Rotowire's week projection."""
+    """{(name,pos): stat_line} from Sleeper/Rotowire's week projection.
+
+    Carries KICKERS as well as the skill positions, and deliberately does so
+    alone -- espn_weekly leaves them out even though ESPN's payload has them.
+    The reason is scoring basis, not availability: ESPN reports made field goals
+    only as BUCKETS (0-39 / 40-49 / 50+), while 719 scores kickers by DISTANCE
+    (`fg_yds`). An ESPN line therefore scores near zero from field goals in that
+    league, and blending it against a Sleeper line that scores correctly would
+    average a right answer with a wrong one. Sleeper's line carries the buckets
+    AND `fgm_yds`, so it scores properly under either league's rules.
+
+    Defenses are still absent here -- they have no comparable stat line -- and
+    come from `special.dst_week()` instead.
+    """
     CACHE.mkdir(parents=True, exist_ok=True)
-    path = CACHE / f"sleeper_proj_{SEASON}_w{week}.json"
+    # Renamed when kickers were added: the old file holds a K-less payload, and
+    # silently reusing it would leave every kicker projected at zero.
+    path = CACHE / f"sleeper_wk_{SEASON}_w{week}.json"
     if path.exists() and not force and \
             (time.time() - path.stat().st_mtime) / 3600 < max_age_hours:
         rows = json.loads(path.read_text())
     else:
         url = (f"https://api.sleeper.com/projections/nfl/{SEASON}/{week}"
                f"?season_type=regular&position[]=QB&position[]=RB"
-               f"&position[]=WR&position[]=TE&order_by=pts_ppr")
+               f"&position[]=WR&position[]=TE&position[]=K&order_by=pts_ppr")
         r = requests.get(url, timeout=60)
         r.raise_for_status()
         rows = r.json()
@@ -96,7 +111,7 @@ def sleeper_weekly(week: int, max_age_hours: int = 6, force: bool = False) -> di
     for row in rows:
         pl = row.get("player") or {}
         pos = pl.get("position")
-        if pos not in ("QB", "RB", "WR", "TE"):
+        if pos not in ("QB", "RB", "WR", "TE", "K"):
             continue
         line = {}
         for k, v in (row.get("stats") or {}).items():
@@ -142,6 +157,69 @@ def bye_teams(week: int, season: int = SEASON) -> set:
     playing = set(s[s.week == week].home_team) | set(s[s.week == week].away_team)
     allteams = set(s.home_team) | set(s.away_team)
     return allteams - playing
+
+
+def opponents(week: int, season: int = SEASON) -> dict:
+    """{team: "@KC" / "vs KC"} for one week. Teams on bye are absent.
+
+    Uses nflverse team codes, which disagree with the projection feeds'
+    (LA/JAX vs LAR/JAC) -- callers should resolve through starts.TEAM_ALIASES
+    the same way byes are, or a handful of players silently show no opponent.
+    """
+    s = schedule(season)
+    out = {}
+    for _, g in s[s.week == week].iterrows():
+        out[g.home_team] = f"vs {g.away_team}"
+        out[g.away_team] = f"@ {g.home_team}"
+    return out
+
+
+def build_pool(league, players, week: int, by_key: dict | None = None,
+               blob: dict | None = None) -> list[dict]:
+    """Roster rows ready to optimise, INCLUDING kickers and defenses.
+
+    Built from the raw platform roster rather than from board rows. Board rows
+    deliberately omit K and DST (see ff.special), so anything built off them
+    leaves two starting slots empty and runs a kicker and a defense light --
+    which is exactly what the Lineup tab did until this existed.
+
+    Defenses have no weekly stat line anywhere and are priced from
+    `special.dst_week`; kickers ride in the weekly blend. Same construction
+    winprob.project_team uses, so a lineup's total and the projection behind its
+    win probability agree instead of differing by ~15 points.
+    """
+    from .names import key as nkey
+    from .special import dst_week
+
+    by_key = by_key or {}
+    wp = weekly_points(week, league.scoring)
+    dsts = dst_week(week)
+    opps = opponents(week)
+    from .starts import TEAM_ALIASES
+
+    pool = []
+    for raw in players:
+        pos = (raw.get("position") or "").upper()
+        pos = "DST" if pos in ("DEF", "D/ST") else pos
+        row = by_key.get(nkey(raw["name"], pos)) or {}
+        pl = {**row, **raw, "position": pos}
+        pl.setdefault("pos_rank", pos)
+        team = (raw.get("team") or "").upper()
+        if pos == "DST":
+            pts, sp = dsts.get(team, 0.0), 0.0
+        else:
+            pts, _n, sp = wp.get(nkey(raw["name"], pos), (0.0, 0, 0.0))
+        pl["week_points"], pl["wk_spread"] = round(pts, 1), round(sp, 1)
+        # Feed codes and nflverse codes disagree; resolve before lookup or LAR
+        # and JAC come back with no opponent at all.
+        pl["opponent"] = opps.get(TEAM_ALIASES.get(team, team), "BYE")
+        if pos in ("K", "DST"):
+            pl["status"], pl["why"] = "ok", ""      # no injury feed for either
+        else:
+            pl["status"], pl["why"] = availability(
+                blob or {}, raw["name"], pos, raw.get("team"), week, pts)
+        pool.append(pl)
+    return pool
 
 
 def outdoor_games(week: int, season: int = SEASON) -> dict:

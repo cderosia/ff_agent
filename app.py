@@ -27,6 +27,8 @@ from ff import draft as draft_mod          # noqa: E402
 from ff import keepers as keeper_mod       # noqa: E402
 from ff import trades as trade_mod         # noqa: E402
 from ff import weekly as weekly_mod        # noqa: E402
+from ff import projlog as projlog_mod      # noqa: E402
+from ff import winprob as winprob_mod      # noqa: E402
 from ff.leagues import _env, load_all      # noqa: E402
 from ff.names import key                   # noqa: E402
 from ff.projections import fetch           # noqa: E402
@@ -105,6 +107,70 @@ def hydrate(league_name):
     return L, rows, meta
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def nfl_state() -> dict:
+    """Authoritative week from Sleeper. Beats each platform's own answer:
+    ESPN and Yahoo disagree during the preseason, and a league that hasn't
+    started reports week 0 or 1 interchangeably."""
+    import requests
+    try:
+        return requests.get("https://api.sleeper.app/v1/state/nfl",
+                            timeout=15).json()
+    except Exception:
+        return {}
+
+
+def _default_week() -> int:
+    w = nfl_state().get("display_week") or nfl_state().get("week")
+    if w:
+        return max(1, int(w))
+    ls, _ = leagues_objects()
+    for l in ls:
+        if l.raw.get("current_week"):
+            return int(l.raw["current_week"])
+    return 1
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def trend_season(week: int) -> tuple[int, int, bool]:
+    """(season, through_week, is_live) for usage trends.
+
+    nflverse only publishes a season once games are played, so before week 1
+    there is no 2026 file at all -- asking for it 404s. Fall back to the last
+    completed season and SAY SO rather than showing last year's numbers as if
+    they were this year's, which is what the old `replay` toggle did by
+    defaulting to on. Flips itself to live data the week it exists."""
+    from ff import weekly as _w
+    if week > 1:
+        try:
+            _w.usage_trend(2026, week - 1)
+            return 2026, week - 1, True
+        except Exception:
+            pass
+    return 2025, 17, False
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def archive_week(week: int) -> str:
+    """Freeze this week's projections the first time the app runs in it.
+
+    The platforms overwrite weekly projections in place, so a week that is not
+    captured before kickoff can never be analysed afterwards -- there is no
+    endpoint that returns what ESPN said last Saturday. Opening the app is the
+    one thing that reliably happens every week, so the capture rides on it.
+    First write wins, so this cannot overwrite a cleaner earlier snapshot, and
+    when the file already exists it costs a single stat() call.
+    """
+    try:
+        made = projlog_mod.snapshot(week)
+        if made is not None:
+            return f"captured week {week}"
+        return ("already captured" if projlog_mod.path_for(week).exists()
+                else "nothing to capture yet")
+    except Exception as e:
+        return f"failed: {type(e).__name__}"
+
+
 # ---------------------------------------------------------------------------
 # sidebar
 # ---------------------------------------------------------------------------
@@ -136,10 +202,20 @@ for nm, err in errors:
     st.sidebar.warning(f"{nm}: {err[:60]}")
 
 st.sidebar.divider()
+_ns = nfl_state()
 st.sidebar.caption(
-    "Preseason: rosters and drafts are empty until they happen. "
-    "Waivers, Lineup and Trades offer a replay of last season so you can see "
-    "real output."
+    f"**{_ns.get('season','2026')} week {_ns.get('display_week','?')}** "
+    f"({_ns.get('season_type','')}). Rosters are read live from each platform. "
+    "Usage trends fall back to 2025 until this season has games; every tab "
+    "that does says so."
+)
+_arch = archive_week(_default_week())
+_n_weeks = len(list((projlog_mod.LOG_DIR / "2026").glob("week*.parquet"))) \
+    if (projlog_mod.LOG_DIR / "2026").exists() else 0
+st.sidebar.caption(
+    f"**Projection archive** — {_arch}; {_n_weeks} week"
+    f"{'s' if _n_weeks != 1 else ''} banked. Every source's numbers are frozen "
+    "before kickoff so the blend can be scored against them at season's end."
 )
 st.sidebar.info(
     "**Draft day** runs separately:\n\n`python3 scripts/draft_server.py`\n\n"
@@ -151,10 +227,11 @@ st.sidebar.info(
 # ---------------------------------------------------------------------------
 # tabs
 # ---------------------------------------------------------------------------
-(t_sunday, t_watch, t_board, t_lineup, t_waiver, t_trade,
- t_keep, t_report) = st.tabs(
-    ["Sunday", "Watch", "Board", "Lineup", "Waivers", "Trades",
-     "Keepers", "Report"])
+# Board lives in scripts/draft_server.py, not here -- the drafts are done.
+# Sunday and Watch were one question asked twice, so they are one tab now.
+(t_dash, t_report, t_sunday, t_lineup, t_waiver, t_trade, t_keep) = st.tabs(
+    ["All leagues", "Report", "Sunday", "Lineup", "Waivers", "Trades",
+     "Keepers"])
 
 
 # ---------------------------------------------------------------------------
@@ -175,20 +252,301 @@ def _holdings(week: int):
     return live.my_holdings(ls, week, get_blob())
 
 
-def _default_week() -> int:
-    ls, _ = leagues_objects()          # returns (leagues, errors)
-    for l in ls:
-        w = l.raw.get("current_week")
-        if w:
-            return int(w)
-    return 1
+# ---- Report ---------------------------------------------------------------
+# One page, no controls. The whole point is that Sunday morning you open this
+# and it already says what to do -- picking a week and a report type and then
+# pressing Build was three decisions before any answer appeared.
+@st.cache_data(ttl=600, show_spinner="building your report…")
+def build_report(league_name: str, week: int):
+    """Lineup + waivers for one league in a single pass.
+
+    Cross-platform on purpose: the emailed report goes through
+    send_weekly.gather(), which talks to Sleeper directly and so has never
+    worked for the ESPN or Yahoo leagues. This uses the same rosters module the
+    Lineup and Waivers tabs already use, so all five leagues render.
+    """
+    from ff import lineup as lineup_mod
+    L_, rows_, _meta = hydrate(league_name)
+    blob = get_blob()
+    by_key = {key(r["name"], r["position"]): r for r in rows_}
+
+    teams = rosters_mod.all_teams(L_, week, blob)
+    if not rosters_mod.has_drafted(L_, teams):
+        return {"drafted": False}
+    mine, _others = rosters_mod.board_rosters(L_, by_key, week, blob)
+    if not mine:
+        return {"drafted": False}
+
+    # --- lineup ---
+    # build_pool carries kickers and defenses; board rows do not (ff.special),
+    # so anything built off board rows leaves two starting slots empty.
+    wp = lineup_mod.weekly_points(week, L_.scoring)
+    my_team = next((t for t in teams if t.mine), None)
+    pool = lineup_mod.build_pool(L_, my_team.players if my_team else [],
+                                 week, by_key, blob)
+    filled, bench = lineup_mod.optimize(pool, L_)
+    calls = lineup_mod.close_calls(filled, bench, L_)
+    total = sum(p["week_points"] for ps in filled.values() for p in ps)
+
+    # Odds. winprob carries a DISTRIBUTION rather than a point estimate, which
+    # is the only way to answer "am I likely to win" -- two lineups at 118 and
+    # 112 are not a 6-point favourite in any useful sense.
+    try:
+        opp = rosters_mod.opponent_of(L_, week, teams)
+        odds = winprob_mod.league_odds(teams, wp, L_, opponent=opp, week=week)
+    except Exception as e:
+        odds = {"error": f"{type(e).__name__}: {e}"}
+
+    # --- waivers ---
+    season, through, live = trend_season(week)
+    taken = {key(pl["name"], pl.get("position"))
+             for t in teams for pl in t.players}
+    cands, risers = [], []
+    try:
+        trend = weekly_mod.usage_trend(season, through)
+        trend["k"] = [key(n, pp) for n, pp in
+                      zip(trend.player_display_name, trend.position)]
+        ppg = weekly_mod.recent_points(season, through, L_.scoring)
+        trend["ppg"] = trend.k.map(ppg).fillna(0.0)
+        heat = weekly_mod.heat_rank(blob) if live else {}
+        base = draft_mod.lineup_value(mine, L_, L_.replacement)
+        for r in trend.itertuples():
+            if r.k in taken or r.snap_pct_recent <= 0.25:
+                continue
+            row = by_key.get(r.k)
+            if row is None:
+                continue
+            gain = draft_mod.lineup_value(mine + [row], L_, L_.replacement) - base
+            risers.append({"Player": row["name"], "Pos": row["pos_rank"],
+                           "PPG": round(r.ppg, 1),
+                           "Snap%": f"{r.snap_pct_recent*100:.0f}%",
+                           "ΔSnap": f"{r.snap_delta*100:+.0f}",
+                           "Tgt": round(r.targets_recent, 1),
+                           "_d": r.snap_delta})
+            if gain <= 0:
+                continue
+            call, why = weekly_mod.claim_call(gain, heat.get(r.k),
+                                              L_.waiver_style, live)
+            cands.append({"Player": row["name"], "Pos": row["pos_rank"],
+                          "Adds": round(gain), "PPG": round(r.ppg, 1),
+                          "Snap%": f"{r.snap_pct_recent*100:.0f}%",
+                          "ΔSnap": f"{r.snap_delta*100:+.0f}",
+                          "Call": call, "Why": why, "_g": gain})
+        cands.sort(key=lambda c: -c["_g"])
+        risers.sort(key=lambda c: -c["_d"])
+    except Exception as e:
+        cands = [{"error": f"{type(e).__name__}: {e}"}]
+
+    drops = sorted(mine, key=lambda r: r["vorp"])[:5]
+    return {"drafted": True, "total": total, "filled": filled, "bench": bench,
+            "calls": calls, "cands": cands[:10], "risers": risers[:10],
+            "drops": drops, "odds": odds,
+            "season": season, "through": through, "live": live,
+            "unavailable": [p for p in pool if p["status"] in ("out", "unknown")]}
+
+
+with t_report:
+    week_now = _default_week()
+    st.header(f"{L.name} — week {week_now}")
+    rep = build_report(L.name, week_now)
+
+    if not rep.get("drafted"):
+        st.info("No roster yet — this fills in the moment the draft finishes.")
+    else:
+        o = rep.get("odds") or {}
+        mode = o.get("mode")
+        m = st.columns(4)
+        m[0].metric("Projected", f"{rep['total']:.1f}")
+        if mode == "guillotine":
+            m[1].metric("Safe this week", f"{o['advance']*100:.0f}%",
+                        f"{o['eliminated']*100:.0f}% eliminated",
+                        delta_color="inverse")
+        elif mode == "head_to_head" and o.get("win") is not None:
+            m[1].metric("Win probability", f"{o['win']*100:.0f}%",
+                        f"vs {o['opponent']}")
+        elif mode == "field":
+            m[1].metric("Projected rank", f"{o['projected_rank']} of {o['of']}",
+                        f"{o.get('beat_median',0)*100:.0f}% to beat median")
+        else:
+            m[1].metric("Odds", "—")
+        m[2].metric("Unavailable", len(rep["unavailable"]))
+        m[3].metric("Waiver adds worth a claim", len(rep["cands"]))
+
+        if mode == "guillotine":
+            st.warning(
+                f"**Guillotine — the lowest scorer is eliminated, so this is "
+                f"survival, not a matchup.** Full lineup projects "
+                f"**{o['mine']['proj']}** (± {o['mine']['sd']}), "
+                f"**{o['projected_rank']} of {o['of']}** in the league. "
+                f"Typical week you finish **{o['median_cushion']} points** clear "
+                f"of last; in a bad one (10th percentile) only "
+                f"**{o['cushion_10th_pct']}**. Rank is not the thing to watch — "
+                f"being last is.")
+        elif mode == "head_to_head" and o.get("win") is not None:
+            st.info(
+                f"**{o['mine']['proj']}** (± {o['mine']['sd']}) against "
+                f"**{o['opponent']}**'s **{o['opponent_proj']}** — "
+                f"**{o['win']*100:.0f}%** to win. Spreads are measured from "
+                f"nflverse 2019-25, so this prices how wild a fantasy week "
+                f"actually is rather than treating the projection as fact.")
+        elif o.get("error"):
+            st.caption(f"odds unavailable — {o['error']}")
+
+        with st.expander("How the league projects this week"):
+            st.dataframe(pd.DataFrame([{
+                "Team": d["team"] + (" (you)" if d["mine"] else ""),
+                "Projected": d["proj"], "±": d["sd"],
+            } for d in o.get("teams", [])]), hide_index=True, width="stretch")
+            st.caption("Variances are added as if players never move together. "
+                       "A stacked lineup (your QB and his own receiver) is "
+                       "genuinely wider than this shows, so these probabilities "
+                       "read slightly overconfident — most of all for stacks.")
+
+        st.subheader("Start")
+        st.dataframe(pd.DataFrame([{
+            "Slot": slot, "Player": p["name"], "Pos": p["pos_rank"],
+            "Team": p.get("team") or "", "Opp": p.get("opponent", ""),
+            "Proj": p["week_points"],
+            "Flag": ("⚠ " + p["why"]) if p["status"] == "risk" else "",
+        } for slot, ps in rep["filled"].items() for p in ps]),
+            hide_index=True, width="stretch")
+
+        if rep["calls"]:
+            st.caption("**Too close to call:** " + " · ".join(
+                f"{c['slot']} — {c['starting']['name']} over "
+                f"{c['alternative']['name']} (gap {c['gap']})"
+                for c in rep["calls"][:4])
+                + "  — inside a projection's noise; use your own read.")
+
+        st.subheader("Waivers")
+        if not rep["live"]:
+            st.caption(f"⚠ No {2026} game data yet, so usage is measured over "
+                       f"**{rep['season']} through week {rep['through']}**. "
+                       "This switches to live data by itself once games are played.")
+        if rep["cands"] and "error" in rep["cands"][0]:
+            st.error(f"usage data unavailable — {rep['cands'][0]['error']}")
+        elif not rep["cands"]:
+            st.success("Nothing on the wire improves your **starting** lineup — "
+                       "don't spend a claim on lineup value alone. With a full "
+                       "healthy roster that is the normal answer: a player who "
+                       "doesn't crack your starters adds zero by definition.")
+        else:
+            st.dataframe(pd.DataFrame(rep["cands"]).drop(columns=["_g"]),
+                         hide_index=True, width="stretch")
+
+        if rep.get("risers"):
+            st.markdown("**Usage risers** — opportunity moves before production, "
+                        "so these are the speculative adds worth a bench spot.")
+            st.dataframe(pd.DataFrame(rep["risers"]).drop(columns=["_d"]),
+                         hide_index=True, width="stretch")
+
+        with st.expander("Bench and droppable"):
+            st.dataframe(pd.DataFrame([{
+                "Player": p["name"], "Pos": p["pos_rank"],
+                "Team": p.get("team") or "", "Opp": p.get("opponent", ""),
+                "Proj": p["week_points"],
+                "Status": p["status"].upper() if p["status"] != "ok" else "",
+            } for p in sorted(rep["bench"], key=lambda x: -x["week_points"])]),
+                hide_index=True, width="stretch")
+            st.caption("Lowest value rostered: " + ", ".join(
+                f"{r['name']} ({round(r['vorp'])})" for r in rep["drops"]))
+
+
+# ---- All leagues ----------------------------------------------------------
+# One screen for five teams. The per-league Report answers "what do I do here";
+# this answers the question you actually have on a Sunday morning -- which of
+# my five needs me at all.
+URGENT_HELP = (
+    "Flagged when something needs a decision from you: a starter ruled out or "
+    "on bye, a starting slot with nobody in it, or elimination risk in the "
+    "guillotine league. A close call is not urgent -- it is two players inside "
+    "a projection's noise, and either is defensible."
+)
+
+
+def _flags(rep) -> list[str]:
+    """What actually needs you. Empty list means the lineup is fine as it sits."""
+    out = []
+    if not rep.get("drafted"):
+        return ["not drafted"]
+    starters = [p for ps in rep["filled"].values() for p in ps]
+    for p in starters:
+        if p.get("status") in ("out", "unknown"):
+            out.append(f"{p['name']} {p.get('status','').upper()}"
+                       + (f" — {p['why']}" if p.get("why") else ""))
+        elif (p.get("week_points") or 0) <= 0 and p["position"] != "DST":
+            out.append(f"{p['name']} projects 0 (bye or inactive)")
+    # An unfilled seat scores nothing, which is the most expensive thing here.
+    L_, _r, _m = hydrate(rep["league"])
+    for slot, want in L_.starters.items():
+        got = len(rep["filled"].get(slot, []))
+        if got < want:
+            out.append(f"no starter at {slot} ({got}/{want})")
+    o = rep.get("odds") or {}
+    if o.get("mode") == "guillotine" and o.get("eliminated", 0) >= 0.12:
+        out.append(f"elimination risk {o['eliminated']*100:.0f}%")
+    return out
+
+
+with t_dash:
+    st.header("All leagues")
+    wk_all = _default_week()
+    st.caption(f"Week {wk_all}. Every league you have drafted, on one line. "
+               "Projections are scored under each league's own rules, so the "
+               "totals are not comparable across leagues — the odds are.")
+
+    rows_out, flagged = [], []
+    for lg in leagues:
+        try:
+            r = build_report(lg.name, wk_all)
+        except Exception as e:
+            rows_out.append({"League": lg.name, "Odds": "error", "Projected": None,
+                             "Needs you": f"{type(e).__name__}"})
+            continue
+        if not r.get("drafted"):
+            rows_out.append({"League": lg.name, "Odds": "—", "Projected": None,
+                             "Opponent / mode": "not drafted", "Needs you": "—"})
+            continue
+        r = {**r, "league": lg.name}
+        o = r.get("odds") or {}
+        mode = o.get("mode")
+        if mode == "guillotine":
+            odds_s, opp = f"{o['advance']*100:.0f}% safe", "guillotine"
+        elif mode == "head_to_head" and o.get("win") is not None:
+            odds_s, opp = f"{o['win']*100:.0f}% win", f"vs {o['opponent']}"
+        elif mode == "field":
+            odds_s, opp = f"#{o['projected_rank']} of {o['of']}", "no matchup"
+        else:
+            odds_s, opp = "—", ""
+        f = _flags(r)
+        if f:
+            flagged.append((lg.name, f))
+        rows_out.append({"League": lg.name, "Odds": odds_s,
+                         "Projected": round(r["total"], 1),
+                         "Opponent / mode": opp,
+                         "Needs you": f"⚠ {len(f)}" if f else "clear"})
+
+    st.dataframe(pd.DataFrame(rows_out), hide_index=True, width="stretch")
+
+    st.subheader("Needs you")
+    st.caption(URGENT_HELP)
+    if not flagged:
+        st.success("Nothing needs a decision. Every drafted lineup is legal, "
+                   "everyone projected is playing, and no elimination risk.")
+    for nm, items in flagged:
+        with st.container(border=True):
+            st.markdown(f"**{nm}**")
+            for i in items:
+                st.markdown(f"- {i}")
 
 
 # ---- Sunday ---------------------------------------------------------------
+# Was two tabs, "Sunday" and "Watch", asking one question: what is on and who
+# of mine is in it. Merged.
 with t_sunday:
     from ff import live as live_mod
     st.header("Sunday")
-    c1, c2, c3 = st.columns([1, 1, 3])
+    c1, c2 = st.columns([1, 4])
     wk = int(c1.number_input("Week", 1, 18, _default_week(), key="sun_wk"))
     if c2.button("Refresh now", key="sun_refresh"):
         _games.clear(); _holdings.clear()
@@ -205,17 +563,48 @@ with t_sunday:
 
     if not hold:
         st.info("No drafted leagues yet — nothing to follow.")
+
+    try:
+        slots = live_mod.watch_by_slot(gs, hold)
+    except Exception:
+        slots = []
+    if slots:
+        st.subheader("What to put on")
+        st.caption("One pick per time slot — you can only watch one game at a "
+                   "time. Starters only: a bench player's points aren't yours "
+                   "this week. A player you roster in three leagues counts "
+                   "three times.")
+        for s_ in slots:
+            g = s_["pick"]
+            with st.container(border=True):
+                st.markdown(
+                    f"**{s_['slot']}** — **{g['away']} @ {g['home']}** on "
+                    f"**{g['network']}** · {g['n_players']} starter"
+                    f"{'s' if g['n_players'] != 1 else ''}, "
+                    f"{g['proj_total']} projected")
+                st.dataframe(
+                    [{"player": h["player"], "pos": h["position"],
+                      "proj": h["proj"], "league": h["league"],
+                      "team": h["nfl_team"]} for h in g["players"]],
+                    hide_index=True, width="stretch")
+                if s_["others"]:
+                    with st.expander(f"other games this slot ({len(s_['others'])})"):
+                        st.dataframe(
+                            [{"game": f"{o['away']} @ {o['home']}",
+                              "on": o["network"], "starters": o["n_players"],
+                              "proj": o["proj_total"]} for o in s_["others"]],
+                            hide_index=True, width="stretch")
+
+    st.subheader("Scoreboard")
     live_now = [g for g in gs if g["state"] == "in"]
-    if live_now:
-        st.subheader(f"In progress ({len(live_now)})")
     for g in (live_now or gs):
         mine_here = hold.get(g["home"], []) + hold.get(g["away"], [])
         if not mine_here and g["state"] != "in":
             continue
-        head = (f"**{g['away']} {g['away_score']} — {g['home_score']} {g['home']}**"
-                if g["state"] != "pre" else
-                f"**{g['away']} @ {g['home']}**")
-        st.markdown(f"{head}  ·  {g['detail']}  ·  {g['network']}")
+        head_ = (f"**{g['away']} {g['away_score']} — {g['home_score']} {g['home']}**"
+                 if g["state"] != "pre" else
+                 f"**{g['away']} @ {g['home']}**")
+        st.markdown(f"{head_}  ·  {g['detail']}  ·  {g['network']}")
         if mine_here:
             st.dataframe(
                 [{"player": h["player"], "pos": h["position"],
@@ -227,82 +616,6 @@ with t_sunday:
         st.divider()
 
 
-# ---- Watch ----------------------------------------------------------------
-with t_watch:
-    from ff import live as live_mod
-    st.header("What to put on")
-    st.caption("One pick per time slot — you can only watch one game at a time. "
-               "Starters only: a bench player's points aren't yours this week. "
-               "A player you roster in three leagues counts three times. Ties go "
-               "to projected points.")
-    wk2 = int(st.number_input("Week", 1, 18, _default_week(), key="watch_wk"))
-    try:
-        slots = live_mod.watch_by_slot(_games(wk2), _holdings(wk2))
-    except Exception as e:
-        st.error(f"{type(e).__name__}: {e}")
-        slots = []
-
-    if not slots:
-        st.info("No games have your starters in them yet.")
-    for s_ in slots:
-        g = s_["pick"]
-        st.subheader(s_["slot"])
-        st.markdown(
-            f"**{g['away']} @ {g['home']}** on **{g['network']}** — "
-            f"{g['n_players']} starter{'s' if g['n_players'] != 1 else ''}, "
-            f"{g['proj_total']} projected points")
-        st.dataframe(
-            [{"player": h["player"], "pos": h["position"], "proj": h["proj"],
-              "league": h["league"], "team": h["nfl_team"]} for h in g["players"]],
-            hide_index=True, width="stretch")
-        if s_["others"]:
-            with st.expander(f"other games this slot ({len(s_['others'])})"):
-                st.dataframe(
-                    [{"game": f"{o['away']} @ {o['home']}", "on": o["network"],
-                      "starters": o["n_players"], "proj": o["proj_total"]}
-                     for o in s_["others"]],
-                    hide_index=True, width="stretch")
-        st.divider()
-
-
-# ---- Board ----------------------------------------------------------------
-with t_board:
-    st.header(f"{L.name} — draft board")
-    c = st.columns(4)
-    c[0].metric("Players", len(rows))
-    c[1].metric("Market", meta["source"], f"{meta['match_rate']:.0%} matched")
-    c[2].metric("Starters", L.starter_slots, f"+{L.bench} bench")
-    c[3].metric("Replacement RB / WR",
-                f"{L.replacement.get('RB',0):.0f} / {L.replacement.get('WR',0):.0f}")
-
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Value — draft later than market")
-        v = board_mod.values(rows, 12)
-        st.dataframe(pd.DataFrame([{
-            "Player": r["name"], "Pos": r["pos_rank"],
-            "You": r["your_rank"], "Market": r["adp_rank"], "Edge": r["edge"],
-        } for r in v]), hide_index=True, width='stretch')
-    with right:
-        st.subheader("Reach — let the room overpay")
-        rr = board_mod.reaches(rows, 12)
-        st.dataframe(pd.DataFrame([{
-            "Player": r["name"], "Pos": r["pos_rank"],
-            "You": r["your_rank"], "Market": r["adp_rank"], "Edge": r["edge"],
-        } for r in rr]), hide_index=True, width='stretch')
-
-    st.subheader("Full board")
-    pos_filter = st.multiselect("Position", ["QB", "RB", "WR", "TE"], [])
-    show = [r for r in rows if not pos_filter or r["position"] in pos_filter]
-    st.dataframe(pd.DataFrame([{
-        "#": r["vbd_rank"], "Player": r["name"], "Pos": r["pos_rank"],
-        "Proj": round(r["points"]), "VORP": round(r["vorp"]),
-        "Market": r.get("adp_rank"), "Edge": r.get("edge"),
-        "Src": r.get("n_sources", 1),
-        "Disagree": f"{r.get('rel_spread',0)*100:.0f}%" if r.get("rel_spread") else "",
-    } for r in show[:250]]), hide_index=True, width='stretch', height=520)
-
-
 # ---- Lineup ---------------------------------------------------------------
 with t_lineup:
     st.header("Set your lineup")
@@ -312,26 +625,25 @@ with t_lineup:
 
     if True:
         from ff import lineup as lineup_mod
-        c1, c2 = st.columns([1, 3])
-        lp_replay = c1.toggle("Replay a past week", value=True, key="lp_rep")
-        wk = int(c2.slider("Week", 1, 18, 10, key="lp_wk"))
-        league_id = L.raw.get("previous_league_id") if lp_replay else L.league_id
+        # `league_id` used to be recomputed here from a "replay last season"
+        # toggle that defaulted to ON -- but board_rosters() reads the live
+        # league regardless, so the toggle only ever moved the WEEK, silently
+        # scoring this year's roster against week 10 of a season not yet played.
+        wk = int(st.slider("Week", 1, 18, _default_week(), key="lp_wk"))
 
         blob = get_blob()
         by_key = {key(r["name"], r["position"]): r for r in rows}
-        mine, _ = rosters_mod.board_rosters(L, by_key, wk, blob)
+        # Raw roster, not board rows: board rows have no kicker and no defense,
+        # so this tab used to render a lineup two starting slots short.
+        _teams = rosters_mod.all_teams(L, wk, blob)
+        _me = next((t for t in _teams if t.mine), None)
+        mine = (lineup_mod.build_pool(L, _me.players, wk, by_key, blob)
+                if _me else [])
 
         if not mine:
             st.info("No roster yet — this fills in after your draft.")
         else:
             with st.spinner("scoring the week…"):
-                wp = lineup_mod.weekly_points(wk, L.scoring)
-                for pl in mine:
-                    pts, n, sp = wp.get(key(pl["name"], pl["position"]), (0.0, 0, 0.0))
-                    pl["week_points"] = round(pts, 1)
-                    pl["wk_spread"] = round(sp, 1)
-                    pl["status"], pl["why"] = lineup_mod.availability(
-                        blob, pl["name"], pl["position"], pl.get("team"), wk, pts)
                 filled, bench = lineup_mod.optimize(mine, L)
                 calls = lineup_mod.close_calls(filled, bench, L)
                 outdoor = lineup_mod.outdoor_games(wk)
@@ -346,8 +658,8 @@ with t_lineup:
             st.subheader("Start")
             st.dataframe(pd.DataFrame([{
                 "Slot": slot, "Player": p["name"], "Pos": p["pos_rank"],
-                "Team": p.get("team") or "", "Proj": p["week_points"],
-                "Spread": p.get("wk_spread", 0),
+                "Team": p.get("team") or "", "Opp": p.get("opponent", ""),
+                "Proj": p["week_points"], "Spread": p.get("wk_spread", 0),
                 "Flag": ("⚠ " + p["why"]) if p["status"] == "risk" else "",
                 "Venue": "outdoors" if outdoor.get(p.get("team")) else "dome",
             } for slot, ps in filled.items() for p in ps]),
@@ -356,7 +668,8 @@ with t_lineup:
             st.subheader("Bench")
             st.dataframe(pd.DataFrame([{
                 "Player": p["name"], "Pos": p["pos_rank"],
-                "Team": p.get("team") or "", "Proj": p["week_points"],
+                "Team": p.get("team") or "", "Opp": p.get("opponent", ""),
+                "Proj": p["week_points"],
                 "Status": p["status"].upper() if p["status"] != "ok" else "",
                 "Reason": p["why"],
             } for p in sorted(bench, key=lambda x: -x["week_points"])],),
@@ -393,18 +706,20 @@ with t_waiver:
         st.info("Waiver analysis needs rosters this platform isn't returning. "
                 "ESPN wiring is still to do.")
     else:
-        replay = st.toggle("Replay last season (real data — rosters are empty preseason)",
-                           value=True)
-        season = 2025 if replay else 2026
-        week = st.slider("Week", 4, 17, 10) if replay else 1
+        week = int(st.slider("Week", 1, 18, _default_week(), key="wv_wk"))
+        season, through, live_data = trend_season(week)
+        replay = not live_data          # kept: claim_call and heat_rank read it
+        if not live_data:
+            st.caption(f"⚠ No 2026 game data yet — usage measured over "
+                       f"**{season} through week {through}**. Rosters below are "
+                       "live. Switches itself once games are played.")
 
         with st.spinner("crunching usage trends…"):
             blob = get_blob()
-            league_id = L.raw.get("previous_league_id") if replay else L.league_id
-            trend = weekly_mod.usage_trend(season, week - 1)
+            trend = weekly_mod.usage_trend(season, through)
             trend["k"] = [key(n, p) for n, p in
                           zip(trend.player_display_name, trend.position)]
-            ppg = weekly_mod.recent_points(season, week - 1, L.scoring)
+            ppg = weekly_mod.recent_points(season, through, L.scoring)
             trend["ppg"] = trend.k.map(ppg).fillna(0.0)
 
             by_key = {key(r["name"], r["position"]): r for r in rows}
@@ -573,52 +888,3 @@ with t_keep:
             } for r in res]), hide_index=True, width='stretch')
 
 
-# ---- Report ---------------------------------------------------------------
-with t_report:
-    st.header("Weekly report")
-    st.caption("The assembled digest — the same thing that gets emailed. "
-               "Tuesday covers claims before waivers run; Wednesday covers "
-               "lineups and trades once they've cleared.")
-
-    if L.platform != "sleeper" or not cfg.get("owner_id"):
-        st.info("Report generation currently needs a Sleeper league with owner_id set.")
-    else:
-        c1, c2, c3 = st.columns([1, 1, 2])
-        kind = c1.radio("Which report", ["Tuesday — waivers", "Wednesday — lineup"],
-                        key="rkind")
-        replay = c2.toggle("Replay a past week", value=True, key="rep")
-        season = 2025 if replay else 2026
-        week = c3.number_input("Week", 4, 17, 10) if replay else 1
-
-        if st.button("Build report", type="primary"):
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "send_weekly", ROOT / "scripts" / "send_weekly.py")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            from ff import notify
-            with st.spinner("building…"):
-                claims, movers, fair, drops = mod.gather(L, cfg, season, int(week), replay)
-                if kind.startswith("Wednesday"):
-                    html = mod.build_lineup_email(L, cfg, season, int(week),
-                                                  replay, fair)
-                else:
-                    html = notify.render_email(L, int(week), claims, movers, fair,
-                                               drops, replay)
-            st.session_state["report_html"] = html
-            st.session_state["report_meta"] = (L.name, int(week))
-
-        if st.session_state.get("report_html"):
-            html = st.session_state["report_html"]
-            name, wk = st.session_state["report_meta"]
-            st.components.v1.html(html, height=900, scrolling=True)
-            d1, d2 = st.columns([1, 3])
-            d1.download_button("Download HTML", html,
-                               file_name=f"{name}-w{wk}.html", mime="text/html")
-            if d2.button("Email it to me now"):
-                from ff import notify
-                try:
-                    top = "report"
-                    st.success(notify.send(f"Week {wk} · {name}", html))
-                except Exception as e:
-                    st.error(f"{e}  —  set SMTP_USER / SMTP_PASS / REPORT_TO in .env")

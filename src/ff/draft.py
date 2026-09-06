@@ -159,22 +159,42 @@ def roster_max(league) -> dict:
     position then picks that position every remaining round -- which is how a
     board recommends nine tight ends. Roster construction is the backstop: you
     start one TE, so a third is never the pick no matter what the maths says.
+
+    `base` is per-team STARTER DEMAND, not dedicated slot count. That distinction
+    only shows up in a league with combo slots, and there it decides everything:
+    the family league starts QB/RB/RB/WR-TE/WR-TE/FLEX with no dedicated WR or TE
+    seat at all. Counting dedicated slots gave WR a base of 0 and so a cap of 3 --
+    in a league where WR fills three of the eight starting spots. Verified before
+    the fix: holding three receivers, the board offered fifteen consecutive
+    running backs and no WR at all. That is the nine-tight-ends bug inverted.
+
+    Slot structure alone cannot separate WR from TE when they share a seat --
+    both are "eligible" -- so the split comes from `starters_used`, the simulated
+    demand vbd already computes. In family that is WR 31 vs TE 3 across 14 teams:
+    receivers win those seats, tight ends do not. Falls back to the old
+    structural count when demand hasn't been computed yet, which keeps this
+    callable before board.build().
     """
-    dedicated, flex = {}, set()
+    dedicated, combo = {}, {}
     for slot, cnt in league.starters.items():
         elig = SLOT_ELIGIBILITY.get(slot, {slot})
         if len(elig) == 1:
             dedicated[next(iter(elig))] = dedicated.get(next(iter(elig)), 0) + cnt
         else:
-            flex |= elig
+            for pos in elig:
+                combo[pos] = combo.get(pos, 0) + cnt
+
+    used = getattr(league, "starters_used", None) or {}
     out = {}
     for pos in ("QB", "RB", "WR", "TE"):
-        base = dedicated.get(pos, 0)
-        # Only RB/WR realistically absorb flex slots and injury depth.
-        if pos in ("RB", "WR"):
-            out[pos] = base + (1 if pos in flex else 0) + 2
+        if used and league.teams:
+            base = int(round(used.get(pos, 0) / league.teams))
         else:
-            out[pos] = base + 1
+            base = dedicated.get(pos, 0) + min(combo.get(pos, 0), 1)
+        # Never cap below the seats you are actually obliged to fill.
+        base = max(base, dedicated.get(pos, 0))
+        # Only RB/WR realistically absorb flex slots and injury depth.
+        out[pos] = base + (2 if pos in ("RB", "WR") else 1)
     return out
 
 
