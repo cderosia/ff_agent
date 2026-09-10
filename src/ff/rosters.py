@@ -330,3 +330,66 @@ def all_matchups(league, week: int, teams: list[Team]) -> list[tuple]:
             return []
         return [(str(h), str(a)) for period, a, h in sched if period == week]
     return []
+
+
+def standings(league) -> dict:
+    """{team_id: {wins, losses, ties, pf}} -- what has ACTUALLY happened.
+
+    Playoff odds that ignore your record are only right in week 1. From week 2
+    a simulation that replays the whole season from 0-0 says the same thing
+    about an 8-1 team and a 1-8 one, which is the opposite of useful.
+    """
+    out = {}
+    try:
+        if league.platform == "sleeper":
+            for r in requests.get(f"{SLEEPER}/league/{league.league_id}/rosters",
+                                  timeout=30).json():
+                st = r.get("settings") or {}
+                out[str(r.get("roster_id"))] = {
+                    "wins": int(st.get("wins") or 0),
+                    "losses": int(st.get("losses") or 0),
+                    "ties": int(st.get("ties") or 0),
+                    "pf": float(st.get("fpts") or 0)
+                          + float(st.get("fpts_decimal") or 0) / 100}
+        elif league.platform == "espn":
+            ck = {"espn_s2": _env("ESPN_S2"), "SWID": _env("ESPN_SWID")}
+            d = requests.get(
+                f"{ESPN}/seasons/2026/segments/0/leagues/{league.league_id}",
+                params={"view": "mTeam"}, headers=UA, cookies=ck,
+                timeout=40).json()
+            for t in (d.get("teams") or []):
+                rec = ((t.get("record") or {}).get("overall") or {})
+                out[str(t.get("id"))] = {
+                    "wins": int(rec.get("wins") or 0),
+                    "losses": int(rec.get("losses") or 0),
+                    "ties": int(rec.get("ties") or 0),
+                    "pf": float(rec.get("pointsFor") or 0)}
+        elif league.platform == "yahoo":
+            from . import yahoo
+            d = yahoo.get(f"/league/{league.raw.get('league_key')}/standings")
+            node = d["fantasy_content"]["league"][1]["standings"][0]["teams"]
+            for k, v in node.items():
+                if k == "count":
+                    continue
+                parts = v["team"]
+                info = {}
+                for bit in parts[0]:
+                    if isinstance(bit, dict):
+                        info.update(bit)
+                w = l_ = ti = 0
+                pf = 0.0
+                for bit in parts[1:]:
+                    if not isinstance(bit, dict):
+                        continue
+                    if "team_standings" in bit:
+                        o = bit["team_standings"].get("outcome_totals") or {}
+                        w, l_, ti = (int(o.get("wins") or 0),
+                                     int(o.get("losses") or 0),
+                                     int(o.get("ties") or 0))
+                    if "team_points" in bit:
+                        pf = float(bit["team_points"].get("total") or 0)
+                out[str(info.get("team_id"))] = {
+                    "wins": w, "losses": l_, "ties": ti, "pf": pf}
+    except Exception:
+        return {}
+    return out

@@ -51,7 +51,17 @@ def get_projections():
 
 @st.cache_data(ttl=900, show_spinner="loading league settings…")
 def get_leagues():
+    """League settings, cached -- but NEVER a partial load.
+
+    A transient DNS blip made four of five leagues fail, and the failure was
+    then cached for fifteen minutes: the sidebar lost those leagues and kept
+    losing them long after the network recovered. A partial result is dropped
+    from the cache immediately so the next rerun retries, which costs one
+    refetch and avoids a quarter-hour of a half-empty app.
+    """
     leagues, errors = load_all()
+    if errors:
+        get_leagues.clear()
     return [l.__dict__ for l in leagues], errors
 
 
@@ -196,12 +206,29 @@ if not leagues:
 # top-level destinations and the league picker only appears once you are in a
 # league.
 names = [l.name for l in leagues]
+
+# ONE radio. Two radios could not be made mutually exclusive: a Streamlit widget
+# keeps its own stored selection, which overrides `index=None`, so the league
+# list stayed visually selected while Home was also selected -- and picking the
+# league you were already "on" fired no change event, which is why 719 needed a
+# detour through another league to open. A single control cannot get into that
+# state at all.
 NAV = ["Home", "Sunday"]
-nav = st.sidebar.radio("View", NAV + ["\u2014 league \u2014"], index=0, key="nav",
-                       label_visibility="collapsed")
-in_league = nav not in NAV
-choice = st.sidebar.radio("League", names, index=0, key="league",
-                          disabled=not in_league)
+OPTIONS = NAV + names
+
+
+def _fmt(o):
+    # Leagues indented so they still read as a group under the two views.
+    return o if o in NAV else f"   {o}"
+
+
+view = st.sidebar.radio("View", OPTIONS, index=0, key="view",
+                        format_func=_fmt, label_visibility="collapsed")
+in_league = view not in NAV
+nav = view
+choice = view if in_league else (st.session_state.get("last_league") or names[0])
+if in_league:
+    st.session_state["last_league"] = view
 L, rows, meta = hydrate(choice)
 cfg = cfgs.get(choice, {})
 
@@ -401,6 +428,29 @@ def live_scores(league_name: str, week: int):
     return ls_mod.scores(L_, week, get_blob())
 
 
+def completed_week() -> int:
+    """Last week whose games are finished. Playoff odds are keyed on this, so
+    they recompute once when the week rolls over (Tuesday, after Monday night)
+    and hold steady in between rather than twitching every refresh."""
+    w = _default_week()
+    try:
+        if ls_mod.any_started(_games(w)) and not all(
+                g.get("state") == "post" for g in _games(w)):
+            return w - 1          # current week still in progress
+        return w if _games(w) and all(g.get("state") == "post"
+                                      for g in _games(w)) else w - 1
+    except Exception:
+        return max(0, w - 1)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def standings_for(league_name: str, through: int) -> dict:
+    """Records as of a completed week. `through` is part of the cache key, so
+    this refetches when the week turns over and not before."""
+    L_, _r, _m = hydrate(league_name)
+    return rosters_mod.standings(L_)
+
+
 @st.cache_data(ttl=45, show_spinner=False)
 def game_progress(week: int) -> dict:
     """{TEAM: fraction of his game still to play}. Drives live odds."""
@@ -502,10 +552,19 @@ def build_report(league_name: str, week: int):
             totals.append((_wsc(rs, L_, byes_all()), var ** 0.5))
             if t_.mine:
                 mi = i_
+        _tw = regular_weeks(league_name)
+        _done = completed_week()
+        _stand = standings_for(league_name, _done)
+        _recs = [_stand.get(t_.team_id, {}) for t_ in teams]
+        _elim = [(r.get("losses", 0) > 0 and L_.raw.get("guillotine"))
+                 for r in _recs]
         season_out = winprob_mod.season_odds(
             totals, mi, playoff_count(league_name) or 6,
-            weeks=regular_weeks(league_name),
+            weeks=_tw, weeks_left=max(0, _tw - _done),
+            records=_recs,
+            eliminated=_elim if L_.raw.get("guillotine") else None,
             guillotine=bool(L_.raw.get("guillotine")))
+        season_out["through"] = _done
     except Exception as e:
         # NB: named season_out, not season -- the waiver block below rebinds
         # `season` to an int year via trend_season(), which silently turned this
@@ -827,7 +886,9 @@ if nav == "Sunday":
 # Keepers only exists where the league actually has them, so four of five
 # leagues stop carrying a tab that could only ever say "not configured".
 HAS_KEEPERS = bool((cfg.get("keepers") or {}).get("max"))
-_names = ["Report", "Lineup", "Matchups", "Waivers", "Trades"]
+# Lineup leads: on any given day the question is "is my lineup right", not
+# "summarise my week".
+_names = ["Lineup", "Report", "Matchups", "Waivers", "Trades"]
 if HAS_KEEPERS:
     _names.append("Keepers")
 _T = dict(zip(_names, st.tabs(_names)))
@@ -1001,13 +1062,31 @@ with t_lineup:
         if LIVE:
             m = st.columns(4)
             _any_mine = any(ls_mod.has_played(q.get("team"), KSTATE) for q in shown)
+            # Projected FINAL: what is banked plus what is still to come. This
+            # is the number that actually moves during the day; "pregame" is
+            # where the week started and never accounts for points scored.
+            live_final = 0.0
+            for q in shown:
+                fr = ls_mod.remaining(q.get("team"), PROG)
+                sc_ = (got or {}).get(key(q["name"], q.get("position")))
+                sc_ = 0.0 if sc_ is None else float(sc_)
+                live_final += sc_ + (q.get("week_points") or 0) * fr
+            # Only swaps between players who have BOTH not kicked off are
+            # actionable -- a lineup locks player by player as games start, so
+            # "leave on bench" against someone who already played is noise.
+            fixable = sum(
+                sw["gain"] for sw in diff["swaps"]
+                if not ls_mod.has_played(
+                    next((q.get("team") for q in shown if q["name"] == sw["out"]),
+                         None), KSTATE))
             m[0].metric("Current",
                         f"{my_lv.get('total', 0):.1f}" if _any_mine else "—",
-                        (f"{my_lv.get('total', 0) - cur:+.1f} vs pregame"
-                         if _any_mine else "nobody has kicked off"))
-            m[1].metric("Pregame projection", f"{cur:.1f}")
-            m[2].metric("Optimal pregame", f"{diff['optimal_total']:.1f}")
-            m[3].metric("Leaving on bench", f"{gap:+.1f}", delta_color="inverse")
+                        "scored so far" if _any_mine else "nobody has kicked off")
+            m[1].metric("Projected final", f"{live_final:.1f}",
+                        f"{live_final - cur:+.1f} vs pregame")
+            m[2].metric("Pregame projection", f"{cur:.1f}")
+            m[3].metric("Still fixable", f"{fixable:+.1f}",
+                        "swaps you can still make", delta_color="inverse")
         else:
             m = st.columns(3)
             m[0].metric("Pregame projection", f"{cur:.1f}")
@@ -1022,6 +1101,8 @@ with t_lineup:
         for a_ in shown:
             nm_ = a_["name"]
             sw = fix.get(nm_)
+            if sw and ls_mod.has_played(a_.get("team"), KSTATE):
+                sw = None          # his game has started; the slot is locked
             stt = (a_.get("status") or "ok")
             bad_row = stt in ("out", "unknown") or (a_.get("week_points") or 0) <= 0
             note, cls = "", ""
@@ -1083,15 +1164,83 @@ with t_lineup:
             st.caption(f"⚠ {L.platform} returned no starting lineup, so this is "
                        "the OPTIMAL lineup, not what you have set.")
 
-        with st.expander(f"Bench ({len(bench)})"):
-            st.dataframe(pd.DataFrame([{
-                "Player": q["name"], "Pos": q.get("pos_rank", q["position"]),
-                "Tm": q.get("team") or "", "Opp": q.get("opponent", ""),
-                "Proj": q.get("week_points", 0),
-                "Status": "" if q.get("status") == "ok"
-                          else (q.get("status") or "").upper(),
-            } for q in sorted(bench, key=lambda x: -x.get("week_points", 0))]),
-                hide_index=True, width="stretch")
+        st.subheader(f"Bench ({len(bench)})")
+        # Same columns as the starters table. A bench player's points are not
+        # yours, but you still need to know what he did -- that is the whole
+        # basis for next week's decision, and for whether a swap you skipped
+        # cost you anything.
+        allpts = (my_lv.get("players") or {}) if LIVE else {}
+
+        def _adds(b):
+            """Points he would add if swapped into your CURRENT lineup.
+
+            Compared against the weakest starter in a slot he is eligible for,
+            skipping any whose game has begun -- that slot is locked and the
+            swap is not available however much better he looks.
+            """
+            best = 0.0
+            for stp in shown:
+                sl = stp.get("slot") or stp.get("position")
+                elig = draft_mod.SLOT_ELIGIBILITY.get(sl, {sl})
+                if b.get("position") not in elig:
+                    continue
+                if LIVE and ls_mod.has_played(stp.get("team"), KSTATE):
+                    continue
+                best = max(best, (b.get("week_points") or 0)
+                           - (stp.get("week_points") or 0))
+            return best
+
+        brows = []
+        for q in sorted(bench, key=lambda x: -(x.get("week_points") or 0)):
+            stt = q.get("status") or "ok"
+            pill = ("" if stt == "ok" else
+                    f'<span class="pill '
+                    f'{"out" if stt in ("out", "unknown") else "risk"}">'
+                    f'{stt}</span>')
+            cells = ""
+            if LIVE:
+                if not ls_mod.has_played(q.get("team"), KSTATE):
+                    cells = ('<td class="ffnum dim">—</td>'
+                             '<td class="ffnum dim">—</td>')
+                else:
+                    sc_ = allpts.get(key(q["name"], q.get("position")))
+                    sc_ = 0.0 if sc_ is None else float(sc_)
+                    pj = q.get("week_points") or 0
+                    fr = ls_mod.remaining(q.get("team"), PROG)
+                    lpj = sc_ + pj * fr
+                    pace = pj * (1 - fr)
+                    c1 = ("good" if sc_ >= pace
+                          else "warn" if sc_ >= pace * .6 else "bad")
+                    c2 = ("good" if lpj >= pj
+                          else "warn" if lpj >= pj * .8 else "bad")
+                    cells = (f'<td class="ffnum {c1}">{sc_:.1f}</td>'
+                             f'<td class="ffnum {c2}">{lpj:.1f}</td>')
+            add = _adds(q)
+            add_cell = (f'<td class="ffnum good">+{add:.1f}</td>'
+                        if add > 0.05 else '<td class="ffnum dim">—</td>')
+            brows.append(
+                f'<tr><td class="ffslot">'
+                f'{q.get("pos_rank", q["position"])}</td>'
+                f'<td><b>{q["name"]}</b> {pill}</td>'
+                f'<td class="dim">{q.get("team") or ""}</td>'
+                f'<td class="dim">{q.get("opponent", "")}</td>'
+                + cells
+                + f'<td class="ffnum dim">'
+                  f'{q.get("week_points", 0):.1f}</td>'
+                + add_cell + '</tr>')
+        st.markdown(
+            '<div class="lp"><div class="ffwrap"><table class="fftable">'
+            '<tr><th>Pos</th><th>Player</th><th>Tm</th><th>Opp</th>'
+            + ('<th class="ffnum">Scored</th><th class="ffnum">Proj now</th>'
+               if LIVE else '')
+            + '<th class="ffnum">Pregame</th>'
+              '<th class="ffnum">Adds to lineup</th></tr>'
+            + "".join(brows) + '</table></div></div>',
+            unsafe_allow_html=True)
+        st.caption("**Adds to lineup** is what he would gain you if swapped in "
+                   "now, against the weakest starter he is eligible to replace. "
+                   "A dash means he improves nothing — and starters whose games "
+                   "have begun are excluded, since those slots are locked.")
 
         calls = lineup_mod.close_calls(filled, bench, L)
         if calls:

@@ -158,7 +158,10 @@ def project_team(team, week_pts: dict, league, week: int | None = None
 
 def season_odds(team_totals: list[tuple[float, float]], me: int,
                 playoff_teams: int, weeks: int = 14, guillotine: bool = False,
-                sims: int = 4000, seed: int = 2026) -> dict:
+                sims: int = 4000, seed: int = 2026,
+                records: list[dict] | None = None,
+                weeks_left: int | None = None,
+                eliminated: list[bool] | None = None) -> dict:
     """Playoff / survival odds over a whole season.
 
     DIFFERENT QUESTION TO `league_odds`, AND THE NUMBERS WILL NOT MATCH.
@@ -198,15 +201,28 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
 
     rng = np.random.default_rng(seed)
     n = len(team_totals)
+    # Simulate only what is LEFT, and start from the record already banked.
+    # Replaying the full season every week made an 8-1 team and a 1-8 team with
+    # identical rosters read the same, which is precisely backwards.
+    left = weeks if weeks_left is None else max(0, weeks_left)
     mu = np.array([t[0] / weeks for t in team_totals])
     sd = np.array([max(t[1], 1e-6) for t in team_totals])
-    # (sims, weeks, teams)
-    W = rng.normal(mu, sd, size=(sims, weeks, n))
+    W = rng.normal(mu, sd, size=(sims, max(left, 1), n))
+    if left == 0:
+        W = W * 0.0
+    banked_w = np.array([float((r or {}).get("wins", 0)) for r in
+                         (records or [{}] * n)])
+    banked_pf = np.array([float((r or {}).get("pf", 0)) for r in
+                          (records or [{}] * n)])
 
     if guillotine:
-        alive = np.ones((sims, n), dtype=bool)
+        # A team already guillotined is out of the field for good; keeping it in
+        # kept dividing your title odds by sixteen all season.
+        start_alive = np.array([not bool(e) for e in
+                                (eliminated or [False] * n)])
+        alive = np.tile(start_alive, (sims, 1))
         survived = np.zeros((sims, n), dtype=int)
-        for wi in range(weeks):
+        for wi in range(left):
             wk = np.where(alive, W[:, wi, :], np.inf)
             loser = wk.argmin(axis=1)
             still = alive.sum(axis=1) > 1
@@ -218,8 +234,8 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
                 "median_weeks": float(np.median(survived[:, me])),
                 "out_first": float((survived[:, me] == 0).mean())}
 
-    wins = np.zeros((sims, n))
-    for wi in range(weeks):
+    wins = np.tile(banked_w, (sims, 1)).astype(float)
+    for wi in range(left):
         perm = np.argsort(rng.random((sims, n)), axis=1)
         a, b = perm[:, 0::2], perm[:, 1::2]
         k = min(a.shape[1], b.shape[1])
@@ -229,7 +245,7 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
         sb = np.take_along_axis(wk, b, axis=1)
         np.add.at(wins, (np.arange(sims)[:, None], a), (sa > sb).astype(float))
         np.add.at(wins, (np.arange(sims)[:, None], b), (sb > sa).astype(float))
-    season = W.sum(axis=1)
+    season = W.sum(axis=1) + banked_pf
     order = np.lexsort((-season, -wins), axis=1)
     rank = np.empty_like(order)
     np.put_along_axis(rank, order, np.arange(1, n + 1)[None, :].repeat(sims, 0), axis=1)
