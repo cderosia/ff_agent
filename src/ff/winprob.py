@@ -120,6 +120,25 @@ def project_team(team, week_pts: dict, league, week: int | None = None
     from .special import dst_week
     dsts = dst_week(week) if week else {}
 
+    # Prefer the lineup the manager ACTUALLY set. Optimising everyone's roster
+    # silently credits every rival with a perfect lineup, which inflates their
+    # projection and understates your odds -- and it made the pregame and live
+    # paths disagree on identical inputs, since the live one always used real
+    # starters. Falls back to the optimiser where a platform reports no lineup.
+    actual = [q for q in (team.starters or []) if q.get("name")]
+    if actual:
+        starters = []
+        for q in actual:
+            pos = (q.get("position") or "").upper()
+            pos = "DST" if pos in ("DEF", "D/ST") else pos
+            if pos == "DST":
+                pts = dsts.get((q.get("team") or "").upper(), 0.0)
+            else:
+                pts, *_ = week_pts.get(nkey(q["name"], pos), (0.0, 0, 0.0))
+            starters.append({**q, "position": pos, "week_points": pts})
+        mu, sd = team_distribution(starters)
+        return mu, sd, starters
+
     pool = []
     for p in team.players:
         pos = (p.get("position") or "").upper()
@@ -137,16 +156,181 @@ def project_team(team, week_pts: dict, league, week: int | None = None
     return mu, sd, starters
 
 
+def season_odds(team_totals: list[tuple[float, float]], me: int,
+                playoff_teams: int, weeks: int = 14, guillotine: bool = False,
+                sims: int = 4000, seed: int = 2026) -> dict:
+    """Playoff / survival odds over a whole season.
+
+    DIFFERENT QUESTION TO `league_odds`, AND THE NUMBERS WILL NOT MATCH.
+    `league_odds` asks "am I safe THIS week" off this week's projections, which
+    already carry byes and injury news. This asks "how does the season go" off
+    season-long projections divided by the schedule, which is the right long-run
+    mean but knows nothing about who is hurt today. Both are correct for their
+    own question; presenting either as the other is what makes them look like a
+    contradiction.
+
+    `team_totals` is (season_points, weekly_sd) per team. Vectorised: weekly
+    totals are drawn for every team and sim at once, so this is milliseconds
+    rather than the minutes a per-player simulation takes.
+
+    Head-to-head seeds on wins with points as the tiebreak, pairing randomly
+    each week -- we do not model the real schedule, so this answers "a team this
+    strong makes the playoffs X% of the time", not "you specifically will".
+
+    KNOWN BIAS, MEASURED. This draws a team's weekly total directly, so it never
+    injures anybody and never lets a bench player cover. That makes it blind to
+    depth, and it therefore understates deep teams. Checked against the slow
+    per-player simulation (gamma draws, MISS_RATE availability, lineup re-optimised
+    every week) on all four head-to-head leagues:
+
+        league            fast    slow    gap
+        friends          78.2%   78.6%   -0.4
+        family           83.9%   86.1%   -2.2
+        719              67.5%   72.6%   -5.1
+        freinds-keeper   53.1%   61.2%   -8.1
+
+    The ordering survives and the picture is the same, but the error scales with
+    bench quality -- freinds-keeper has the deepest bench of the five leagues,
+    and is exactly where the gap is worst. Read these as a floor, not a estimate,
+    for a team carrying real depth.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    n = len(team_totals)
+    mu = np.array([t[0] / weeks for t in team_totals])
+    sd = np.array([max(t[1], 1e-6) for t in team_totals])
+    # (sims, weeks, teams)
+    W = rng.normal(mu, sd, size=(sims, weeks, n))
+
+    if guillotine:
+        alive = np.ones((sims, n), dtype=bool)
+        survived = np.zeros((sims, n), dtype=int)
+        for wi in range(weeks):
+            wk = np.where(alive, W[:, wi, :], np.inf)
+            loser = wk.argmin(axis=1)
+            still = alive.sum(axis=1) > 1
+            alive[np.arange(sims)[still], loser[still]] = False
+            survived += alive.astype(int)
+        return {"mode": "guillotine",
+                "advance": float(alive[:, me].mean()),      # last team standing
+                "weeks_survived": float(survived[:, me].mean()),
+                "median_weeks": float(np.median(survived[:, me])),
+                "out_first": float((survived[:, me] == 0).mean())}
+
+    wins = np.zeros((sims, n))
+    for wi in range(weeks):
+        perm = np.argsort(rng.random((sims, n)), axis=1)
+        a, b = perm[:, 0::2], perm[:, 1::2]
+        k = min(a.shape[1], b.shape[1])
+        a, b = a[:, :k], b[:, :k]
+        wk = W[:, wi, :]
+        sa = np.take_along_axis(wk, a, axis=1)
+        sb = np.take_along_axis(wk, b, axis=1)
+        np.add.at(wins, (np.arange(sims)[:, None], a), (sa > sb).astype(float))
+        np.add.at(wins, (np.arange(sims)[:, None], b), (sb > sa).astype(float))
+    season = W.sum(axis=1)
+    order = np.lexsort((-season, -wins), axis=1)
+    rank = np.empty_like(order)
+    np.put_along_axis(rank, order, np.arange(1, n + 1)[None, :].repeat(sims, 0), axis=1)
+    return {"mode": "head_to_head",
+            "playoff": float((rank[:, me] <= playoff_teams).mean()),
+            "first": float((rank[:, me] == 1).mean()),
+            "last": float((rank[:, me] == n).mean()),
+            "mean_wins": float(wins[:, me].mean()),
+            "mean_rank": float(rank[:, me].mean())}
+
+
+
+def live_project_team(team, week_pts: dict, league, live_row: dict | None,
+                      progress: dict, week: int | None = None
+                      ) -> tuple[float, float, list]:
+    """(mean, sd, per-player detail) for a team MID-WEEK.
+
+    Splits every starter into what is already settled and what is still to
+    come. A finished player contributes his actual score and NO variance -- it
+    is a fact, not a forecast. A player yet to kick off contributes his full
+    projection and full variance. One mid-game contributes his points so far
+    plus the remainder of his projection, carrying only the share of variance
+    matching the football left to play.
+
+        mean_i = scored_i + proj_i * f
+        var_i  = (cv_i * proj_i)^2 * f          (f = fraction of game remaining)
+
+    Variance falling linearly with time is the random-walk assumption. It has
+    the two endpoints that matter: full spread before kickoff, none at the
+    whistle. Between those it is an approximation, and `game_progress` documents
+    why clock time only loosely tracks fantasy opportunity.
+
+    Uses the lineup the manager ACTUALLY set where the platform reports it --
+    points come from who is in the slots, not from who should be.
+    """
+    from .lineup import optimize
+    from .livescore import remaining
+    from .names import key as nkey
+    from .special import dst_week
+
+    dsts = dst_week(week) if week else {}
+    scored = (live_row or {}).get("starters") or {}
+
+    actual = [p for p in (team.starters or []) if p.get("name")]
+    if actual:
+        pool = []
+        for p in actual:
+            pos = (p.get("position") or "").upper()
+            pos = "DST" if pos in ("DEF", "D/ST") else pos
+            if pos == "DST":
+                pts = dsts.get((p.get("team") or "").upper(), 0.0)
+            else:
+                pts, *_ = week_pts.get(nkey(p["name"], pos), (0.0, 0, 0.0))
+            pool.append({**p, "position": pos, "week_points": pts})
+        starters = pool
+    else:
+        _mu, _sd, starters = project_team(team, week_pts, league, week=week)
+
+    mu = 0.0
+    var = 0.0
+    detail = []
+    for p in starters:
+        proj = p.get("week_points") or 0.0
+        f = remaining(p.get("team"), progress)
+        got = scored.get(nkey(p["name"], p.get("position")))
+        got = 0.0 if got is None else float(got)
+        m = got + proj * f
+        sd = player_sd(proj, p.get("position")) * (f ** 0.5)
+        mu += m
+        var += sd ** 2
+        detail.append({**p, "scored": got, "remaining": f,
+                       "live_proj": round(m, 1)})
+    return mu, var ** 0.5, detail
+
+
 def league_odds(teams, week_pts: dict, league, opponent=None,
-                week: int | None = None) -> dict:
-    """Your odds this week: head-to-head, or survival in a guillotine league."""
+                week: int | None = None, live: dict | None = None,
+                progress: dict | None = None) -> dict:
+    """Your odds this week: head-to-head, or survival in a guillotine league.
+
+    With `live` (per-team actual scores) and `progress` (fraction of each NFL
+    game remaining) the odds become LIVE: banked points stop being uncertain and
+    the percentage tightens as the day goes on. Without them the behaviour is
+    exactly as before, so a caller that knows nothing about live scoring is
+    unaffected.
+    """
     dists, mine_i = [], None
     detail = []
     for i, t in enumerate(teams):
-        mu, sd, starters = project_team(t, week_pts, league, week=week)
+        if progress:
+            mu, sd, starters = live_project_team(
+                t, week_pts, league, (live or {}).get(t.team_id), progress,
+                week=week)
+        else:
+            mu, sd, starters = project_team(t, week_pts, league, week=week)
         dists.append((mu, sd))
         detail.append({"team": t.name, "mine": t.mine, "proj": round(mu, 1),
-                       "sd": round(sd, 1), "n_starters": len(starters)})
+                       "sd": round(sd, 1), "n_starters": len(starters),
+                       "scored": round(sum(p.get("scored", 0)
+                                           for p in starters), 1)
+                                 if progress else None})
         if t.mine:
             mine_i = i
     if mine_i is None:

@@ -62,6 +62,10 @@ def games(week: int | None = None, season: int = 2026,
             "network": ", ".join(dict.fromkeys(nets)) or "—",
             "state": status.get("state"),           # pre | in | post
             "detail": status.get("shortDetail"),
+            # Clock, for pricing how much of a player's game is still to come.
+            # `clock` is seconds left in the CURRENT period, not the game.
+            "period": (c.get("status") or {}).get("period"),
+            "clock": (c.get("status") or {}).get("clock"),
             "completed": bool(status.get("completed")),
         })
     return sorted(out, key=lambda g: (g["kickoff"] or "", g["home"]))

@@ -35,7 +35,7 @@ RISK_STATUSES = {"Questionable"}
 # ---------------------------------------------------------------------------
 # weekly projections
 # ---------------------------------------------------------------------------
-def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 6,
+def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 1,
                 force: bool = False) -> dict:
     """{(name,pos): stat_line} from ESPN's week-specific projection."""
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -60,12 +60,21 @@ def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 6,
         pos = POS.get(p.get("defaultPositionId"))
         if not pos:
             continue
-        s = next((x for x in p.get("stats", [])
-                  if x.get("seasonId") == SEASON and x.get("statSourceId") == 1
-                  and x.get("statSplitTypeId") == 1
-                  and x.get("scoringPeriodId") == week), None)
-        if not s:
+        # ESPN can return MORE THAN ONE row for the same week: a real projection
+        # and an empty stub with appliedTotal 0 and no stats. `next()` took
+        # whichever happened to come first, so when the stub sorted first the
+        # stat line came out empty, `if line` dropped the player, and he
+        # silently showed 0.0 -- intermittently, because the order is not
+        # stable between pulls. Caught on Brock Bowers (a 15.3 row and a 0.0
+        # stub for the same week 1) after it had already hit TreVeyon Henderson.
+        # Take the richest row, never merely the first.
+        cands = [x for x in p.get("stats", [])
+                 if x.get("seasonId") == SEASON and x.get("statSourceId") == 1
+                 and x.get("statSplitTypeId") == 1
+                 and x.get("scoringPeriodId") == week]
+        if not cands:
             continue
+        s = max(cands, key=lambda x: len(x.get("stats") or {}))
         line = {}
         for sid, val in (s.get("stats") or {}).items():
             nm = ESPN_STAT.get(int(sid))
@@ -76,7 +85,35 @@ def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 6,
     return out
 
 
-def sleeper_weekly(week: int, max_age_hours: int = 6, force: bool = False) -> dict:
+def espn_injuries(max_age_hours: int = 1) -> dict:
+    """{(name,pos): ESPN injuryStatus} -- a second opinion on availability.
+
+    The Sleeper player blob is the only injury source `availability()` reads,
+    and it goes stale: on the morning of week 1 it called Brock Bowers ACTIVE
+    while ESPN had him DOUBTFUL and both projection feeds had dropped him. Two
+    disagreeing sources is worth more than one confident one, so the worse of
+    the two wins -- benching a healthy player costs you his points, starting an
+    inactive one costs you the whole slot.
+    """
+    path = CACHE / f"espn_proj_{SEASON}_raw.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
+    out = {}
+    for e in payload.get("players", []):
+        p = e["player"]
+        pos = POS.get(p.get("defaultPositionId"))
+        st = p.get("injuryStatus")
+        if pos and st and st not in ("ACTIVE", "NORMAL"):
+            out[key(p.get("fullName", ""), pos)] = st.replace("_", " ").title()
+    return out
+
+
+def sleeper_weekly(week: int, max_age_hours: int = 1, force: bool = False) -> dict:
     """{(name,pos): stat_line} from Sleeper/Rotowire's week projection.
 
     Carries KICKERS as well as the skill positions, and deliberately does so
@@ -174,6 +211,42 @@ def opponents(week: int, season: int = SEASON) -> dict:
     return out
 
 
+
+_BLOB_TEAM: dict = {}
+
+
+def _team_from_blob(blob: dict, name: str, pos: str) -> str | None:
+    """Pro team for a player the roster feed gave us no team for."""
+    from .names import key as nkey
+    if not _BLOB_TEAM:
+        for pid, p in (blob or {}).items():
+            nm = p.get("full_name") or " ".join(
+                x for x in (p.get("first_name"), p.get("last_name")) if x)
+            po = p.get("position")
+            if nm and po and p.get("team"):
+                _BLOB_TEAM[nkey(nm, "DST" if po == "DEF" else po)] = p["team"]
+            # Sleeper keys team defenses by the team code itself.
+            if po == "DEF" and pid.isalpha():
+                _BLOB_TEAM[("__dst__", pid.upper())] = pid.upper()
+    hit = _BLOB_TEAM.get(nkey(name, pos))
+    if hit:
+        return hit
+    if pos == "DST":
+        # "Eagles D/ST", "Baltimore Ravens" -- match on any word that is a
+        # known nickname or city fragment of a team we have.
+        for k, v in _BLOB_TEAM.items():
+            if k[0] == "__dst__" and v.lower() in name.lower():
+                return v
+        import re
+        words = [w for w in re.split(r"[^A-Za-z]+", name) if len(w) > 2]
+        for pid, p in (blob or {}).items():
+            if p.get("position") == "DEF" and p.get("team"):
+                label = f"{p.get('first_name','')} {p.get('last_name','')}".lower()
+                if any(w.lower() in label for w in words):
+                    return p["team"]
+    return None
+
+
 def build_pool(league, players, week: int, by_key: dict | None = None,
                blob: dict | None = None) -> list[dict]:
     """Roster rows ready to optimise, INCLUDING kickers and defenses.
@@ -195,6 +268,7 @@ def build_pool(league, players, week: int, by_key: dict | None = None,
     wp = weekly_points(week, league.scoring)
     dsts = dst_week(week)
     opps = opponents(week)
+    inj = espn_injuries()
     from .starts import TEAM_ALIASES
 
     pool = []
@@ -204,12 +278,28 @@ def build_pool(league, players, week: int, by_key: dict | None = None,
         row = by_key.get(nkey(raw["name"], pos)) or {}
         pl = {**row, **raw, "position": pos}
         pl.setdefault("pos_rank", pos)
-        team = (raw.get("team") or "").upper()
+        # ESPN's roster reader has no pro-team field, so `raw["team"]` is None
+        # and the dict merge above wipes out the board row's real team. That
+        # made every ESPN player look like he was on bye -- the whole family
+        # lineup read "BYE" against live week-1 games. Never let a null from one
+        # source overwrite a value from another.
+        if not pl.get("team"):
+            pl["team"] = row.get("team")
+        if not pl.get("team") and blob:
+            # Last resort for kickers and defenses on ESPN: they have neither a
+            # roster team nor a board row (ff.special keeps K/DST off the
+            # board), so without this they had no team, no opponent and -- for a
+            # defense, whose points are keyed by team -- a projection of zero.
+            pl["team"] = _team_from_blob(blob, raw["name"], pos)
+        team = (pl.get("team") or "").upper()
         if pos == "DST":
             pts, sp = dsts.get(team, 0.0), 0.0
         else:
             pts, _n, sp = wp.get(nkey(raw["name"], pos), (0.0, 0, 0.0))
-        pl["week_points"], pl["wk_spread"] = round(pts, 1), round(sp, 1)
+        # Full precision, rounded only at render. Rounding each player to 1dp
+        # and then summing gave a team total 0.1 adrift of winprob's, which sums
+        # raw -- the same lineup showing two different numbers on two tabs.
+        pl["week_points"], pl["wk_spread"] = pts, round(sp, 1)
         # Feed codes and nflverse codes disagree; resolve before lookup or LAR
         # and JAC come back with no opponent at all.
         pl["opponent"] = opps.get(TEAM_ALIASES.get(team, team), "BYE")
@@ -218,6 +308,18 @@ def build_pool(league, players, week: int, by_key: dict | None = None,
         else:
             pl["status"], pl["why"] = availability(
                 blob or {}, raw["name"], pos, raw.get("team"), week, pts)
+            # Second opinion. Sleeper's blob said ACTIVE for a player ESPN had
+            # DOUBTFUL, so trust whichever source is more pessimistic.
+            e = inj.get(nkey(raw["name"], pos))
+            if e:
+                worse = ("out" if e.split()[0] in
+                         ("Out", "Doubtful", "Injury", "Suspension") else "risk")
+                rank = {"ok": 0, "risk": 1, "unknown": 1, "out": 2}
+                if rank.get(worse, 0) > rank.get(pl["status"], 0):
+                    pl["status"] = worse
+                    pl["why"] = f"ESPN: {e}"
+                elif pl["status"] == "ok":
+                    pl["why"] = f"ESPN: {e}"
         pool.append(pl)
     return pool
 
@@ -322,3 +424,67 @@ def close_calls(filled: dict, bench: list[dict], league,
                                 "gap": round(gap, 1)})
     out.sort(key=lambda x: x["gap"])
     return out
+
+def actual_vs_optimal(pool: list[dict], filled: dict, actual: list[dict]) -> dict:
+    """What you have set on the platform, versus what the maths wants.
+
+    The app could previously only show its own optimal lineup, which meant it
+    could not answer the question you actually have on Sunday morning -- "is the
+    lineup I already set wrong, and what do I change" -- and gave no sign when
+    a doubtful player was still sitting in a starting slot.
+    """
+    from .names import key as nkey
+
+    by_name = {nkey(p["name"], p["position"]): p for p in pool}
+    started, missing = [], []
+    for a in actual:
+        if not a.get("name"):
+            missing.append(a.get("slot"))
+            continue
+        pos = a.get("position") or ""
+        pos = "DST" if pos in ("DEF", "D/ST") else pos
+        row = by_name.get(nkey(a["name"], pos))
+        started.append({**(row or {}), "name": a["name"], "slot": a.get("slot"),
+                        "position": pos,
+                        "week_points": (row or {}).get("week_points", 0.0),
+                        "status": (row or {}).get("status", "unknown"),
+                        "why": (row or {}).get("why", "")})
+    opt = [p for v in filled.values() for p in v]
+    opt_names = {nkey(p["name"], p["position"]) for p in opt}
+    cur_names = {nkey(p["name"], p["position"]) for p in started}
+
+    bench_in = sorted((p for p in opt if nkey(p["name"], p["position"]) not in cur_names),
+                      key=lambda p: -p.get("week_points", 0))
+    sit_out = sorted((p for p in started if nkey(p["name"], p["position"]) not in opt_names),
+                     key=lambda p: p.get("week_points", 0))
+    swaps = []
+    for out_p, in_p in zip(sit_out, bench_in):
+        swaps.append({
+            "out": out_p["name"], "out_pts": round(out_p.get("week_points", 0), 1),
+            "out_slot": out_p.get("slot", ""), "out_status": out_p.get("status", ""),
+            "out_why": out_p.get("why", ""),
+            "in": in_p["name"], "in_pts": round(in_p.get("week_points", 0), 1),
+            "gain": round(in_p.get("week_points", 0) - out_p.get("week_points", 0), 1)})
+
+    # A player who is both unavailable AND already being swapped out is ONE
+    # problem, not two. Reporting "Bowers is OUT" and "bench Bowers for Likely"
+    # as separate items made the to-do list twice as long as the actual work and
+    # buried the instruction under the diagnosis.
+    swapped_out = {nkey(sw["out"], "") [0] for sw in swaps}
+    broken = [b for b in started
+              if (b.get("status") in ("out", "unknown")
+                  or (b.get("week_points", 0) <= 0 and b["position"] != "DST"))]
+    unresolved = [b for b in broken
+                  if nkey(b["name"], "")[0] not in swapped_out]
+    return {
+        "actual": started,
+        "actual_total": round(sum(p.get("week_points", 0) for p in started), 1),
+        "optimal_total": round(sum(p.get("week_points", 0) for p in opt), 1),
+        "swaps": swaps,
+        "empty_slots": missing,
+        # only the ones no swap already covers
+        "broken": unresolved,
+        # every broken starter, including ones a swap already fixes -- the
+        # lineup table uses this to paint rows red
+        "all_broken": broken,
+    }

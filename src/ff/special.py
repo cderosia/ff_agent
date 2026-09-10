@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import functools
 
+import time
+
 import requests
 
 SEASON = 2026
@@ -34,8 +36,34 @@ SLEEPER_PROJ = ("https://api.sleeper.app/projections/nfl/{yr}/{wk}"
                 "?season_type=regular&position[]={pos}&order_by=ppr")
 UA = {"User-Agent": "Mozilla/5.0"}
 
+# `functools.lru_cache` was wrong here and it hid for weeks: it is keyed only on
+# the arguments and never expires, so in a long-running app (the Streamlit site
+# stays up for days) a defense's projection was frozen at whatever it was the
+# first time the process asked. "Refresh data" could not shift it either --
+# nothing clears an lru_cache. A TTL cache keeps the network savings and still
+# lets a number move on game day, and `cache_clear` stays available so the
+# refresh button can force it.
+_TTL_SECONDS = 900
 
-@functools.lru_cache(maxsize=4)
+
+def _ttl_cache(fn):
+    store: dict = {}
+
+    @functools.wraps(fn)
+    def wrapper(*args):
+        now = time.time()
+        hit = store.get(args)
+        if hit and now - hit[0] < _TTL_SECONDS:
+            return hit[1]
+        val = fn(*args)
+        store[args] = (now, val)
+        return val
+
+    wrapper.cache_clear = store.clear
+    return wrapper
+
+
+@_ttl_cache
 def dst_early(weeks: int = 3, season: int = SEASON) -> list[dict]:
     """Defenses ranked by projected points over the first `weeks` weeks."""
     agg: dict[str, dict] = {}
@@ -122,7 +150,7 @@ def kickers(projections: list[dict], league) -> list[dict]:
 
 
 
-@functools.lru_cache(maxsize=32)
+@_ttl_cache
 def dst_week(week: int, season: int = SEASON) -> dict:
     """{team code: projected points} for defenses in one week.
 
