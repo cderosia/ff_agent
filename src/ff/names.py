@@ -38,6 +38,27 @@ def normalize(name: str) -> str:
     return ALIASES.get(n, n)
 
 
+# Suffix as it appears in a DISPLAY name, with its separator.
+_SUFFIX_DISP = re.compile(r"[,\s]+(?:jr|sr|ii|iii|iv|v)\.?\s*$", re.I)
+
+
+def display(name: str | None) -> str:
+    """One spelling of a player's name, for showing to a human.
+
+    `normalize()` already folds Jr./III away for JOINING, so the data was never
+    actually mismatched -- but each platform keeps its own spelling in the field
+    we print, and the same man appeared as "Travis Etienne" on a Sleeper roster
+    and "Travis Etienne Jr." on an ESPN one, two rows apart on the same page.
+    Dropping the suffix is the deterministic choice: it needs no lookup table and
+    cannot pick the wrong variant when two sources disagree.
+
+    Casing and punctuation are otherwise left alone, so "Amon-Ra St. Brown" and
+    "D'Andre Swift" survive intact.
+    """
+    n = " ".join(str(name or "").split())
+    return _SUFFIX_DISP.sub("", n) or n
+
+
 def key(name: str, position: str) -> tuple[str, str]:
     """Join key including position, which disambiguates same-name players."""
     return (normalize(name), (position or "").upper())

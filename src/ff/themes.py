@@ -70,6 +70,16 @@ def css(t: dict | None = None, scope: str = "") -> str:
 {s}.fftable tr:last-child td {{ border-bottom:none; }}
 {s}.ffnum {{ text-align:right; font-variant-numeric:tabular-nums;
   font-family:{t['font']}; font-weight:600; }}
+/* Left-aligned twin of .ffnum, for the right-hand side of a mirrored
+   matchup: its numbers hug the centre line so the two teams read outward. */
+{s}.ffnuml {{ text-align:left; font-variant-numeric:tabular-nums;
+  font-family:{t['font']}; font-weight:600; }}
+{s}.ffright {{ text-align:right; }}
+/* `.fftable th` (0,1,1) outranks a bare `.ffnum` (0,1,0), so numeric HEADERS
+   were left-aligned over right-aligned numbers. Qualify them to match. */
+{s}.fftable th.ffnum {{ text-align:right; }}
+{s}.fftable th.ffnuml {{ text-align:left; }}
+{s}.fftable th.ffright {{ text-align:right; }}
 {s}.ffslot {{ color:{t['dim']}; font-size:12px; text-transform:{up};
   letter-spacing:{t['track']}; }}
 {s}.good {{ color:{GOOD}; }} {s}.bad {{ color:{BAD}; }}
@@ -141,6 +151,14 @@ def global_css(t: dict | None = None) -> str:
   .stButton button:hover {{ border-color:{t['accent']};
     color:{t['accent']}; }}
 
+  /* Global, not scoped: the dot is drawn inside several different wrappers
+     and a scoped rule silently did nothing wherever that scope was absent. */
+  .livedot {{ display:inline-block; width:7px; height:7px; border-radius:50%;
+    background:{GOOD}; margin-left:7px; vertical-align:middle;
+    box-shadow:0 0 6px rgba(74,222,128,.75); }}
+  /* Mirrored: on a right-aligned name the dot goes INSIDE, or it becomes the
+     rightmost thing on the row and the names stop lining up. */
+  .livedot.pre {{ margin-left:0; margin-right:7px; }}
   [data-testid="stCaptionContainer"] {{ color:{t['dim']}; font-size:12px; }}
   hr {{ border-color:{t['line']}; }}
 </style>"""

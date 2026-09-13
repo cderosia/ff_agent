@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from ff import board as board_mod
+from ff import special as special_mod    # noqa: E402
 from ff import rosters as rosters_mod          # noqa: E402
 from ff import draft as draft_mod          # noqa: E402
 from ff import keepers as keeper_mod       # noqa: E402
@@ -34,6 +35,7 @@ from ff.leagues import _env, load_all      # noqa: E402
 from ff.names import key                   # noqa: E402
 from ff.projections import fetch           # noqa: E402
 from ff import themes as th                # noqa: E402
+from ff import lineup as lineup_mod        # noqa: E402
 from ff import livescore as ls_mod         # noqa: E402
 
 st.set_page_config(page_title="FF Agent", page_icon="🏈", layout="wide")
@@ -328,10 +330,15 @@ def _games(week: int):
 
 @st.cache_data(ttl=120, show_spinner="reading your rosters…")
 def _holdings(week: int):
+    """Both sides of every league, in ONE roster fetch.
+
+    The Sunday page needs your players and your opponents'; pulling them
+    separately would read every roster on every platform twice.
+    """
     from ff import live
     from ff.leagues import load_all as _la
     ls, _ = _la()
-    return live.my_holdings(ls, week, get_blob())
+    return live.holdings(ls, week, get_blob(), sides=("mine", "opp"))
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -460,6 +467,20 @@ def game_progress(week: int) -> dict:
         return {}
 
 
+@st.cache_data(ttl=45, show_spinner=False)
+def allowed_now(week: int) -> dict:
+    """{TEAM: (points allowed, yards allowed)} for games in progress.
+
+    Only defenses need this, and only while a game is live -- see
+    special.dst_live for why a defense's tiers cannot be read off its score.
+    """
+    try:
+        from ff import live as _lv
+        return _lv.allowed(_games(week))
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def kickoff_states(week: int) -> dict:
     """{TEAM: pre|in|post}. Lets a zero mean "played and scored nothing"
@@ -478,8 +499,22 @@ def games_started(week: int) -> bool:
         return False
 
 
+def report(league_name: str, week: int):
+    """build_report, with a cache key that turns over every minute once games
+    are live. The 10-minute TTL was right in the week but wrong on a Sunday:
+    live odds and live scores inside the report could not move faster than the
+    report itself was allowed to be rebuilt."""
+    bust = 0
+    try:
+        if ls_mod.any_started(_games(week)):
+            bust = int(time.time() // 60)
+    except Exception:
+        pass
+    return build_report(league_name, week, bust)
+
+
 @st.cache_data(ttl=600, show_spinner="building your report…")
-def build_report(league_name: str, week: int):
+def build_report(league_name: str, week: int, bust: int = 0):
     """Lineup + waivers for one league in a single pass.
 
     Cross-platform on purpose: the emailed report goes through
@@ -526,7 +561,8 @@ def build_report(league_name: str, week: int):
         odds = winprob_mod.league_odds(
             teams, wp, L_, opponent=opp, week=week,
             live=_livesc if _any_live else None,
-            progress=_prog if _any_live else None)
+            progress=_prog if _any_live else None,
+            allowed=allowed_now(week) if _any_live else None)
         odds["is_live"] = _any_live
         _my_id = my_team.team_id if my_team else None
         _opp_id = opp.team_id if opp else None
@@ -639,14 +675,152 @@ URGENT_HELP = (
 )
 
 
-def _flags(rep, name) -> list[dict]:
-    """Everything in one league that wants a decision, worst first."""
-    out = []
-    if not rep.get("drafted"):
+LIVEDOT = '<span class="livedot"></span>'
+
+
+def dot_if_live(team, states) -> str:
+    """Green dot when this player's game is in progress."""
+    return LIVEDOT if ls_mod.is_playing(team, states) else ""
+
+
+def team_dot(t, states) -> str:
+    """Green dot when any of a fantasy team's STARTERS is on the field."""
+    return (LIVEDOT if any(ls_mod.is_playing(q.get("team"), states)
+                           for q in (t.starters or [])) else "")
+
+
+def side_by_side(league, a_team, b_team, week, live, prog, states,
+                 by_key, blob, scope="mu") -> str:
+    """Two lineups laid out the way a fantasy matchup is normally read.
+
+    Names sit on the outer edges and the numbers meet in the middle around the
+    slot, so the two teams mirror each other:
+
+        Jalen Hurts   12.3  18.2 | QB |  9.1  20.4   Dak Prescott
+
+    Per-player numbers come from `lineup.build_pool` -- the SAME function the
+    Lineup tab uses -- rather than being recomputed here. The old version read
+    `weekly_points` directly, which carries no defenses at all (they come from
+    `special.dst_week`), so every DST projected 0.0 and the expander's total
+    disagreed with the matchup total by exactly one defense. Projections are
+    derived in one place and displayed in many; anywhere that recalculates them
+    is a place they can drift.
+    """
+    def side(t):
+        pool = lineup_mod.build_pool(league, t.players, week, by_key, blob)
+        idx = {key(q["name"], q["position"]): q for q in pool}
+        row = (live or {}).get(t.team_id) or {}
+        got = row.get("starters") or {}
+        out = []
+        for q in (t.starters or []):
+            if not q.get("name"):
+                out.append(None)
+                continue
+            pos = (q.get("position") or "").upper()
+            pos = "DST" if pos in ("DEF", "D/ST") else pos
+            src = idx.get(key(q["name"], pos)) or {}
+            pj = src.get("week_points") or 0.0
+            tm = src.get("team") or q.get("team")
+            sc_ = got.get(key(q["name"], pos))
+            sc_ = None if sc_ is None else float(sc_)
+            fr = ls_mod.remaining(tm, prog)
+            out.append({"slot": q.get("slot"), "name": q["name"], "team": tm,
+                        "cur": sc_,
+                        "proj": special_mod.live_points(
+                            league.scoring, pos, sc_ or 0, pj, fr,
+                            ls_mod.pick(tm, allowed_now(week))),
+                        "playing": ls_mod.is_playing(tm, states),
+                        "started": ls_mod.has_played(tm, states)})
         return out
+
+    A, B = side(a_team), side(b_team)
+    a_mine, b_mine = bool(a_team.mine), bool(b_team.mine)
+
+    # Player names are never coloured. Green is semantic everywhere else in the
+    # app (ahead / good), so colouring every name on your own team both drowned
+    # that meaning and made the column look like a status it wasn't. Whose team
+    # is whose is carried by the header and the dot, not by the row text.
+    def cells(z, right):
+        if not z:
+            return '<td colspan="3"></td>'
+        cur = "—" if not z["started"] else f'{(z["cur"] or 0):.1f}'
+        prj = f'{z["proj"]:.1f}'
+        if right:
+            # Mirror image: numbers hug the centre, name flush to the right
+            # edge, and the dot sits INSIDE the name so the right edge stays
+            # flush -- the same reason it trails the name on the left.
+            dot = f'<span class="livedot pre"></span>' if z["playing"] else ""
+            return (f'<td class="ffnuml">{cur}</td>'
+                    f'<td class="ffnuml dim">{prj}</td>'
+                    f'<td class="ffright">{dot}{z["name"]}</td>')
+        dot = LIVEDOT if z["playing"] else ""
+        return (f'<td>{z["name"]}{dot}</td>'
+                f'<td class="ffnum">{cur}</td>'
+                f'<td class="ffnum dim">{prj}</td>')
+
+    rows = []
+    for x, y in zip(A + [None] * max(0, len(B) - len(A)),
+                    B + [None] * max(0, len(A) - len(B))):
+        slot = (x or y or {}).get("slot", "")
+        rows.append('<tr>' + cells(x, False)
+                    + f'<td class="ffslot" style="text-align:center">{slot}</td>'
+                    + cells(y, True) + '</tr>')
+
+    def tot(side_rows):
+        live_ = [z for z in side_rows if z]
+        cur = (f'{sum((z["cur"] or 0) for z in live_):.1f}'
+               if any(z["started"] for z in live_) else "—")
+        return cur, f'{sum(z["proj"] for z in live_):.1f}'
+    ca, pa = tot(A)
+    cb, pb = tot(B)
+
+    return (f'<div class="{scope}"><div class="ffwrap"><table class="fftable">'
+            f'<tr><th class="{"good" if a_mine else ""}">{a_team.name}</th>'
+            '<th class="ffnum">Cur</th><th class="ffnum">Proj</th><th></th>'
+            '<th class="ffnuml">Cur</th><th class="ffnuml">Proj</th>'
+            f'<th class="ffright {"good" if b_mine else ""}">{b_team.name}</th>'
+            '</tr>'
+            + "".join(rows)
+            # 7 columns: name | cur | proj | slot | cur | proj | name
+            + f'<tr><td></td><td class="ffnum"><b>{ca}</b></td>'
+              f'<td class="ffnum"><b>{pa}</b></td>'
+              f'<td class="ffslot" style="text-align:center">TOTAL</td>'
+              f'<td class="ffnuml"><b>{cb}</b></td>'
+              f'<td class="ffnuml"><b>{pb}</b></td><td></td></tr>'
+            + '</table></div></div>')
+
+
+def stm_alias(t: str) -> str:
+    """Feed team code -> nflverse code, so LAR/JAC match a live game."""
+    from ff.starts import TEAM_ALIASES
+    return TEAM_ALIASES.get(t, t)
+
+
+def _flags(rep, name, week: int | None = None) -> tuple[list[dict], int]:
+    """Everything in one league that STILL wants a decision, worst first.
+
+    Returns (items, locked) -- `locked` counts the suggestions dropped because
+    the football has overtaken them. A lineup locks player by player as games
+    kick off, so a swap is only real while BOTH men are still on the bench of a
+    game that hasn't started; once Odunze's game is under way, "start Odunze" is
+    not a task, it is a regret. Listing it anyway trains you to ignore the list.
+    """
+    out, locked = [], 0
+    if not rep.get("drafted"):
+        return out, locked
     L_, _r, _m = hydrate(name)
+    KS = kickoff_states(week) if week else {}
+
+    def started(team) -> bool:
+        return bool(week) and ls_mod.has_played(team, KS)
+
     d = rep.get("diff") or {}
     for b in d.get("broken", []):
+        # He is OUT and his game has kicked off: the slot is settled at whatever
+        # it scored and there is nothing left to decide.
+        if started(b.get("team")):
+            locked += 1
+            continue
         out.append({"sev": 0, "text": f"**{b.get('slot') or b['position']}: "
                     f"{b['name']}** is "
                     f"{(b.get('status') or 'unavailable').upper()}"
@@ -655,6 +829,11 @@ def _flags(rep, name) -> list[dict]:
     for sl in d.get("empty_slots", []):
         out.append({"sev": 0, "text": f"**{sl}** has nobody in it"})
     for sw in d.get("swaps", []):
+        # EITHER side having started kills the move: you cannot pull a man whose
+        # game is under way, and you cannot push one in either.
+        if started(sw.get("out_team")) or started(sw.get("in_team")):
+            locked += 1
+            continue
         bad = sw["out_status"] in ("out", "unknown")
         # One line, not two: the reason he has to come out and the instruction
         # for who replaces him are the same decision.
@@ -675,13 +854,104 @@ def _flags(rep, name) -> list[dict]:
     if o.get("mode") == "guillotine" and o.get("eliminated", 0) >= 0.12:
         out.append({"sev": 1, "text": f"Elimination risk "
                     f"**{o['eliminated']*100:.0f}%** this week"})
-    return sorted(out, key=lambda x: x["sev"])
+    return sorted(out, key=lambda x: x["sev"]), locked
 
 
 # ---- Sunday ---------------------------------------------------------------
 # Was two tabs, "Sunday" and "Watch", asking one question: what is on and who
 # of mine is in it. Merged.
 # ---- Lineup ---------------------------------------------------------------
+
+
+def stake_rows(week: int) -> dict:
+    """{NFL team: [enriched STARTER rows]} -- yours and your opponents'.
+
+    The single source behind both Home's "playing right now" and the Sunday
+    page, so the two cannot disagree about who is on the field or what he has.
+    Starters only: a bench player's points are nobody's, not yours and not your
+    opponent's, so he is noise on a page about what to root for.
+
+    Guillotine leagues contribute no opponent rows -- there is no one rival
+    there, and fifteen of them is not a thing anyone can watch.
+    """
+    hold = _holdings(week)
+    PROG = game_progress(week)
+    KST = kickoff_states(week)
+    started = games_started(week)
+    ALLOW = allowed_now(week)
+    _sc = {L.name: L.scoring for L in leagues}
+    lv = {L.name: (live_scores(L.name, week) if started else {})
+          for L in leagues}
+    out = {}
+    for tm, v in hold.items():
+        keep = []
+        for h in v:
+            if not h.get("starter"):
+                continue
+            row = (lv.get(h["league"]) or {}).get(h.get("team_id")) or {}
+            sc = (row.get("starters") or {}).get(h.get("key"))
+            has = ls_mod.has_played(h["nfl_team"], KST)
+            sc = float(sc) if sc is not None else (0.0 if has else None)
+            fr = ls_mod.remaining(h["nfl_team"], PROG)
+            keep.append({**h, "cur": sc,
+                         "live": special_mod.live_points(
+                             _sc.get(h["league"]) or {}, h.get("position"),
+                             sc or 0, h["proj"], fr,
+                             ls_mod.pick(h["nfl_team"], ALLOW)),
+                         "playing": ls_mod.is_playing(h["nfl_team"], KST)})
+        if keep:
+            out[tm] = keep
+    return out
+
+
+def stake_table(rows, scope="home") -> str:
+    """One game's players: yours tinted green, your opponents' tinted red."""
+    def _order(rs):
+        # Grouped by PLAYER within each side, best group first. A man you roster
+        # in three leagues is one thing to watch, not three scattered rows --
+        # sorting purely by points split him up and put strangers between his
+        # own lines.
+        best = {}
+        for h in rs:
+            k = h["player"]
+            best[k] = max(best.get(k, float("-inf")), h["live"])
+        return sorted(rs, key=lambda h: (-best[h["player"]], h["player"],
+                                         -h["live"]))
+    ordered = (_order([h for h in rows if h.get("side") != "opp"])
+               + _order([h for h in rows if h.get("side") == "opp"]))
+    trs = []
+    last_player = None
+    for h in ordered:
+        opp_row = h.get("side") == "opp"
+        tint = "rgba(248,113,113,.08)" if opp_row else "rgba(74,222,128,.07)"
+        cur = "—" if h["cur"] is None else f'{h["cur"]:.1f}'
+        # Where he is heading against where he started. A point either way is
+        # inside the noise and says nothing, so it stays neutral rather than
+        # flashing at you.
+        gap = h["live"] - (h["proj"] or 0)
+        lcls = "warn" if abs(gap) <= 1.0 else ("good" if gap > 0 else "bad")
+        # Repeat appearances of the same man are his other leagues; naming him
+        # once keeps the group readable.
+        same = h["player"] == last_player
+        last_player = h["player"]
+        nm = (f'<span class="dim">{h["player"]}</span>' if same
+              else f'<b>{h["player"]}</b>')
+        trs.append(
+            f'<tr style="background:{tint}">'
+            f'<td>{nm}{LIVEDOT if h["playing"] else ""}</td>'
+            f'<td class="ffslot">{h["position"]}</td>'
+            f'<td class="dim">{h["league"]}</td>'
+            f'<td class="{"bad" if opp_row else "good"}">{h.get("who", "")}</td>'
+            f'<td class="ffslot">{h["nfl_team"]}</td>'
+            f'<td class="ffnum">{cur}</td>'
+            f'<td class="ffnum {lcls}">{h["live"]:.1f}</td>'
+            f'<td class="ffnum dim">{h["proj"]:.1f}</td></tr>')
+    return (f'<div class="{scope}"><div class="ffwrap"><table class="fftable">'
+            '<tr><th>Player</th><th>Pos</th><th>League</th><th>Who</th>'
+            '<th>Tm</th><th class="ffnum">Current</th>'
+            '<th class="ffnum">Proj now</th>'
+            '<th class="ffnum">Pregame</th></tr>'
+            + "".join(trs) + '</table></div></div>')
 
 
 if nav == "Home":
@@ -691,10 +961,11 @@ if nav == "Home":
 
     LIVE = games_started(wk_all)
     KST = kickoff_states(wk_all)
-    cards, todo, total_flags = [], [], 0
+    PROGH = game_progress(wk_all)
+    cards, todo, total_flags, locked_total = [], [], 0, 0
     for lg in leagues:
         try:
-            r = build_report(lg.name, wk_all)
+            r = report(lg.name, wk_all)
         except Exception as e:
             cards.append((lg.name, "error", f"{type(e).__name__}: {e}",
                           None, None, None))
@@ -741,12 +1012,19 @@ if nav == "Home":
                 return (live.get(tid) or {}).get("total")
             my_live = _side(r.get("_my_id"))
             them_live = _side(r.get("_opp_id"))
-        f = _flags(r, lg.name)
+        f, _lk = _flags(r, lg.name, wk_all)
         total_flags += len(f)
+        locked_total += _lk
         if f:
             todo.append((lg.name, f))
+        # A dot means "on the field right now" -- for you, and for whoever you
+        # are playing. It goes out at the final whistle rather than staying lit.
+        _st = (r.get("_starter_teams") or {})
+        _dot = lambda tid: (LIVEDOT if any(
+            ls_mod.is_playing(x, KST) for x in (_st.get(tid) or [])) else "")
         cards.append((lg.name, head, sub, extra, opp,
-                      (mine_p, them_p, margin, len(f), my_live, them_live)))
+                      (mine_p, them_p, margin, len(f), my_live, them_live,
+                       _dot(r.get("_my_id")), _dot(r.get("_opp_id")))))
 
     # --- odds, one card per league ---
     html = ['<div class="home"><div class="ffwrap">',
@@ -756,15 +1034,17 @@ if nav == "Home":
             '<th></th>'
             + ('<th class="ffnum">Current</th><th class="ffnum">Opp now</th>'
                if LIVE else '')
-            + '<th class="ffnum">Pregame</th><th class="ffnum">Them</th>'
-            '<th class="ffnum">Margin</th><th>Season</th>'
-            '<th class="ffnum">To do</th></tr>']
+            + ('<th class="ffnum">Proj now</th>'
+               '<th class="ffnum">Them now</th>' if LIVE else
+               '<th class="ffnum">Pregame</th><th class="ffnum">Them</th>')
+            + '<th class="ffnum">Margin</th><th>Season</th>'
+              '<th class="ffnum">To do</th></tr>']
     for nm, head, sub, extra, opp, nums in cards:
         if nums is None:
             html.append(f'<tr><td><b>{nm}</b></td><td class="dim" '
                         f'colspan="{9 if LIVE else 7}">{sub}</td></tr>')
             continue
-        mine_p, them_p, margin, nf, my_live, them_live = nums
+        mine_p, them_p, margin, nf, my_live, them_live, my_dot, opp_dot = nums
         try:
             pct = float(str(head).rstrip("%"))
         except ValueError:
@@ -774,9 +1054,9 @@ if nav == "Home":
         todo_cell = (f'<span class="bad">{nf}</span>' if nf
                      else '<span class="good">clear</span>')
         html.append(
-            f'<tr><td><b>{nm}</b></td>'
+            f'<tr><td><b>{nm}</b>{my_dot}</td>'
             f'<td class="{cls}" style="font-size:19px;font-weight:700">{head}</td>'
-            f'<td class="dim" style="font-size:12px">{sub}<br>{opp}</td>'
+            f'<td class="dim" style="font-size:12px">{sub}<br>{opp}{opp_dot}</td>'
             + (f'<td class="ffnum" style="font-size:17px;font-weight:700">'
                f'{"\u2014" if my_live is None else f"{my_live:.1f}"}</td>'
                f'<td class="ffnum dim">'
@@ -791,6 +1071,85 @@ if nav == "Home":
     html.append('</table></div></div>')
     st.markdown("\n".join(html), unsafe_allow_html=True)
 
+    # One expander per league: your lineup beside your opponent's, slot by slot.
+    # Same renderer the Matchups tab uses, so the two can never disagree.
+    for lg in leagues:
+        try:
+            r = report(lg.name, wk_all)
+        except Exception:
+            continue
+        if not r.get("drafted"):
+            continue
+        L_, _rw, _mt = hydrate(lg.name)
+        try:
+            tms_ = rosters_mod.all_teams(L_, wk_all, get_blob())
+            me_t = next((t for t in tms_ if t.mine), None)
+            opp_t = rosters_mod.opponent_of(L_, wk_all, tms_)
+            if opp_t is None and L_.raw.get("guillotine"):
+                # No opponent -- the field is the opponent, so line yourself up
+                # against whoever is currently last.
+                wpx = lineup_mod.weekly_points(wk_all, L_.scoring)
+                lowest, lo = None, None
+                for t in tms_:
+                    mu, _s, _d = winprob_mod.live_project_team(
+                        t, wpx, L_, live_scores(lg.name, wk_all).get(t.team_id),
+                        PROGH, week=wk_all, allowed=allowed_now(wk_all))
+                    if lo is None or mu < lo:
+                        lowest, lo = t, mu
+                opp_t = lowest if lowest and not lowest.mine else None
+            if not (me_t and opp_t):
+                continue
+            wpx = lineup_mod.weekly_points(wk_all, L_.scoring)
+            with st.expander(f"{lg.name}  ·  you vs {opp_t.name}"):
+                bk_ = {key(rr["name"], rr["position"]): rr for rr in _rw}
+                st.markdown(
+                    side_by_side(L_, me_t, opp_t, wk_all,
+                                 live_scores(lg.name, wk_all), PROGH, KST,
+                                 bk_, get_blob(), scope="home"),
+                    unsafe_allow_html=True)
+        except Exception as e:
+            st.caption(f"{lg.name}: couldn't build matchup — "
+                       f"{type(e).__name__}: {e}")
+
+    # --- playing right now ---------------------------------------------
+    # During games this is the thing you actually want: who is on the field
+    # this minute, what they have, and whether that is ahead of plan. Grouped
+    # by GAME because that is how the afternoon is organised -- one game can
+    # matter to you in three leagues at once.
+    #
+    # Same rows and same table as the Sunday page (stake_rows / stake_table):
+    # yours and your opponents', starters only.
+    _live_games = [g for g in (_games(wk_all) or []) if g.get("state") == "in"]
+    if _live_games:
+        st.markdown("")
+        st.markdown("#### Playing right now")
+        _stake = stake_rows(wk_all)
+        _shown = 0
+        for g in _live_games:
+            rws_ = _stake.get(g["home"], []) + _stake.get(g["away"], [])
+            if not rws_:
+                continue
+            _shown += 1
+            mine_n = sum(1 for h in rws_ if h.get("side") != "opp")
+            st.markdown(
+                f'<div class="home"><h2>{g["away"]} {g.get("away_score", 0)} — '
+                f'{g.get("home_score", 0)} {g["home"]}</h2>'
+                f'<div class="ffsub">{g.get("detail") or ""} · '
+                f'{g.get("network") or ""} · '
+                f'<span class="good">{mine_n} for</span> · '
+                f'<span class="bad">{len(rws_) - mine_n} against</span></div>'
+                f'</div>', unsafe_allow_html=True)
+            st.markdown(stake_table(rws_, "home"), unsafe_allow_html=True)
+        if not _shown:
+            st.caption("None of your starters are in a game that's live.")
+        else:
+            st.caption("**Green rows are yours, red rows are against you.** A "
+                       "green dot means he is on the field right now. "
+                       "**Current** is banked; **Proj now** is where he "
+                       "finishes at his projected rate for the football left — green "
+                       "if that is ahead of his pregame number, red if "
+                       "behind, amber inside a point either way.")
+
     # --- what needs you ---
     st.markdown("")
     st.markdown('<div class="home">', unsafe_allow_html=True)
@@ -800,12 +1159,23 @@ if nav == "Home":
     if not todo:
         st.markdown('<div class="home"><div class="ffok">Nothing needs a '
                     'decision. Every lineup is legal, everyone starting is '
-                    'playing, and none of them can be improved.</div></div>',
+                    'playing, and none of them can be improved.</div></div>'
+                    if not locked_total else
+                    '<div class="home"><div class="ffok">Nothing you can still '
+                    'act on. Every remaining problem is in a game that has '
+                    'already kicked off.</div></div>',
                     unsafe_allow_html=True)
     for nm, items in todo:
         st.markdown(f"**{nm}**")
         for it in items:
             (st.error if it["sev"] == 0 else st.warning)(it["text"])
+    # Said out loud rather than silently dropped: the difference between "your
+    # lineup is fine" and "it is too late to fix" matters, and only one of them
+    # is worth remembering for next week.
+    if locked_total:
+        st.caption(f"{locked_total} suggestion"
+                   f"{'s' if locked_total != 1 else ''} not shown — "
+                   "those games have started, so the slots are locked.")
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
@@ -816,9 +1186,10 @@ if nav == "Sunday":
     wk = int(c1.number_input("Week", 1, 18, _default_week(), key="sun_wk"))
     if c2.button("Refresh now", key="sun_refresh"):
         _games.clear(); _holdings.clear()
-    st.caption("Scores refresh every 30 seconds. Your players are pulled from "
-               "every league that has drafted, so one game can matter to you "
-               "several times over.")
+    st.caption("Your players are pulled from every league that has drafted, so "
+               "one game can matter to you several times over. This page does "
+               "NOT update on its own — reload, or hit Refresh now, to re-read "
+               "the scoreboard.")
 
     try:
         gs = _games(wk)
@@ -830,55 +1201,58 @@ if nav == "Sunday":
     if not hold:
         st.info("No drafted leagues yet — nothing to follow.")
 
+    # "What to put on" is about YOUR afternoon, so it sees only your side.
+    mine_only = {t: [h for h in v if h.get("side") != "opp" and h.get("starter")]
+                 for t, v in hold.items()}
+    mine_only = {t: v for t, v in mine_only.items() if v}
     try:
-        slots = live_mod.watch_by_slot(gs, hold)
+        slots = live_mod.watch_by_slot(gs, mine_only)
     except Exception:
         slots = []
+    # One line per window, not a table each. The full team-by-team detail is in
+    # the game list below, and printing it twice in two different shapes was
+    # the reason this page read as two designs arguing with each other.
     if slots:
-        st.subheader("What to put on")
-        st.caption("One pick per time slot — you can only watch one game at a "
-                   "time. Starters only: a bench player's points aren't yours "
-                   "this week. A player you roster in three leagues counts "
-                   "three times.")
-        for s_ in slots:
-            g = s_["pick"]
-            with st.container(border=True):
-                st.markdown(
-                    f"**{s_['slot']}** — **{g['away']} @ {g['home']}** on "
-                    f"**{g['network']}** · {g['n_players']} starter"
-                    f"{'s' if g['n_players'] != 1 else ''}, "
-                    f"{g['proj_total']} projected")
-                st.dataframe(
-                    [{"player": h["player"], "pos": h["position"],
-                      "proj": h["proj"], "league": h["league"],
-                      "team": h["nfl_team"]} for h in g["players"]],
-                    hide_index=True, width="stretch")
-                if s_["others"]:
-                    with st.expander(f"other games this slot ({len(s_['others'])})"):
-                        st.dataframe(
-                            [{"game": f"{o['away']} @ {o['home']}",
-                              "on": o["network"], "starters": o["n_players"],
-                              "proj": o["proj_total"]} for o in s_["others"]],
-                            hide_index=True, width="stretch")
+        st.caption("**Best window:** " + " · ".join(
+            f"{s_['slot']} → {s_['pick']['away']} @ {s_['pick']['home']} "
+            f"({s_['pick']['network']})" for s_ in slots))
 
-    st.subheader("Scoreboard")
-    live_now = [g for g in gs if g["state"] == "in"]
-    for g in (live_now or gs):
-        mine_here = hold.get(g["home"], []) + hold.get(g["away"], [])
-        if not mine_here and g["state"] != "in":
-            continue
-        head_ = (f"**{g['away']} {g['away_score']} — {g['home_score']} {g['home']}**"
-                 if g["state"] != "pre" else
-                 f"**{g['away']} @ {g['home']}**")
-        st.markdown(f"{head_}  ·  {g['detail']}  ·  {g['network']}")
-        if mine_here:
-            st.dataframe(
-                [{"player": h["player"], "pos": h["position"],
-                  "league": h["league"],
-                  "role": "START" if h["starter"] else "bench",
-                  "proj": h["proj"]} for h in
-                 sorted(mine_here, key=lambda h: (not h["starter"], -h["proj"]))],
-                hide_index=True, width="stretch")
+    st.markdown(th.css(scope="sun"), unsafe_allow_html=True)
+
+    # Same source and same table as Home's "playing right now".
+    starters_by_team = stake_rows(wk)
+
+    def _rows_for(g):
+        return (starters_by_team.get(g["home"], [])
+                + starters_by_team.get(g["away"], []))
+
+    # Only games you actually have a stake in, either way. A game with none of
+    # your starters and none of your opponents' is not a game you have any
+    # reason to watch.
+    slate = [g for g in gs if _rows_for(g)]
+    st.subheader(f"Games that matter ({len(slate)})")
+    st.caption("Only games holding a starter of yours or of the team playing "
+               "you. **Green rows are yours, red rows are against you.** A "
+               "green dot means he is on the field right now. **Current** is "
+               "banked, **Proj now** is where he finishes at his projected rate "
+               "for the football left — green if that is ahead of his "
+               "pregame number, red if behind, amber inside a point "
+               "either way.")
+
+    # Time first, then how much of the game is yours.
+    for g in sorted(slate, key=lambda x: ((x.get("kickoff") or ""),
+                                          -len(_rows_for(x)))):
+        here = _rows_for(g)
+        head_ = (f"{g['away']} {g['away_score']} — {g['home_score']} {g['home']}"
+                 if g["state"] != "pre" else f"{g['away']} @ {g['home']}")
+        mine_n = sum(1 for h in here if h.get("side") != "opp")
+        dot = LIVEDOT if g["state"] == "in" else ""
+        st.markdown(
+            f"**{head_}**{dot}  ·  {g['detail']}  ·  {g['network']}  ·  "
+            f"<span class='good'>{mine_n} for</span> · "
+            f"<span class='bad'>{len(here) - mine_n} against</span>",
+            unsafe_allow_html=True)
+        st.markdown(stake_table(here, "sun"), unsafe_allow_html=True)
         st.divider()
     st.stop()
 
@@ -905,7 +1279,7 @@ t_waiver, t_trade, t_keep = _T.get("Waivers"), _T.get("Trades"), _T.get("Keepers
 with t_report:
     week_now = _default_week()
     st.markdown(th.css(scope="lg"), unsafe_allow_html=True)
-    rep = build_report(L.name, week_now)
+    rep = report(L.name, week_now)
 
     if not rep.get("drafted"):
         st.info("No roster yet — this fills in the moment the draft finishes.")
@@ -1044,12 +1418,22 @@ with t_lineup:
         st.info("No roster yet — this fills in after your draft.")
     else:
         st.markdown(th.css(scope="lp"), unsafe_allow_html=True)
-        filled, bench = lineup_mod.optimize(mine, L)
+        filled, opt_bench = lineup_mod.optimize(mine, L)
         diff = lineup_mod.actual_vs_optimal(mine, filled,
                                             (_me.starters if _me else []))
         have_actual = bool(diff["actual"])
         shown = (diff["actual"] if have_actual
                  else [{**q, "slot": sl} for sl, v in filled.items() for q in v])
+
+        # Bench is the complement of the STARTERS TABLE, not the optimizer's
+        # leftovers. `optimize` benches whoever the maths wants benched, so on
+        # any week with a suggested swap its bench held the man you are actually
+        # starting -- he appeared in both tables -- while the suggested
+        # replacement, sitting in `filled`, appeared in neither. The two tables
+        # have to partition the same roster.
+        _starting = {key(q["name"], q.get("position")) for q in shown}
+        bench = [q for q in mine
+                 if key(q["name"], q.get("position")) not in _starting]
         cur = diff["actual_total"] if have_actual else diff["optimal_total"]
         gap = diff["optimal_total"] - cur
 
@@ -1066,11 +1450,17 @@ with t_lineup:
             # is the number that actually moves during the day; "pregame" is
             # where the week started and never accounts for points scored.
             live_final = 0.0
+            _allw = allowed_now(wk)
             for q in shown:
                 fr = ls_mod.remaining(q.get("team"), PROG)
                 sc_ = (got or {}).get(key(q["name"], q.get("position")))
                 sc_ = 0.0 if sc_ is None else float(sc_)
-                live_final += sc_ + (q.get("week_points") or 0) * fr
+                # Same rule as every per-player cell below, so the header total
+                # is the column's sum rather than a second opinion about it.
+                live_final += special_mod.live_points(
+                    L.scoring, q.get("position"), sc_,
+                    q.get("week_points") or 0, fr,
+                    ls_mod.pick(q.get("team"), _allw))
             # Only swaps between players who have BOTH not kicked off are
             # actionable -- a lineup locks player by player as games start, so
             # "leave on bench" against someone who already played is noise.
@@ -1134,7 +1524,9 @@ with t_lineup:
                     # the score against his PACE (how far through his game he
                     # is), the live projection against where he STARTED.
                     fr = ls_mod.remaining(a_.get("team"), PROG)
-                    lp = pts_now + proj_now * fr
+                    lp = special_mod.live_points(
+                        L.scoring, a_.get("position"), pts_now, proj_now, fr,
+                        ls_mod.pick(a_.get("team"), allowed_now(wk)))
                     pace = proj_now * (1 - fr)
                     lcls = ("good" if pts_now >= pace
                             else "warn" if pts_now >= pace * .6 else "bad")
@@ -1146,7 +1538,7 @@ with t_lineup:
             trows.append(
                 f'<tr style="{"background:rgba(248,113,113,.07)" if cls else ""}">'
                 f'<td class="ffslot">{a_.get("slot", "")}</td>'
-                f'<td class="{cls}"><b>{nm_}</b></td>'
+                f'<td class="{cls}"><b>{nm_}</b>{dot_if_live(a_.get("team"), KSTATE)}</td>'
                 f'<td class="dim">{a_.get("team") or ""}</td>'
                 f'<td class="dim">{a_.get("opponent", "")}</td>'
                 + live_cell
@@ -1221,7 +1613,7 @@ with t_lineup:
             brows.append(
                 f'<tr><td class="ffslot">'
                 f'{q.get("pos_rank", q["position"])}</td>'
-                f'<td><b>{q["name"]}</b> {pill}</td>'
+                    f'<td><b>{q["name"]}</b>{dot_if_live(q.get("team"), KSTATE)} {pill}</td>'
                 f'<td class="dim">{q.get("team") or ""}</td>'
                 f'<td class="dim">{q.get("opponent", "")}</td>'
                 + cells
@@ -1242,7 +1634,7 @@ with t_lineup:
                    "A dash means he improves nothing — and starters whose games "
                    "have begun are excluded, since those slots are locked.")
 
-        calls = lineup_mod.close_calls(filled, bench, L)
+        calls = lineup_mod.close_calls(filled, opt_bench, L)
         if calls:
             st.caption("**Too close to call:** " + " · ".join(
                 f"{c['slot']} — {c['starting']['name']} over "
@@ -1273,10 +1665,12 @@ with t_match:
         for t in tms:
             if _lv_any:
                 mu, sd, _st = winprob_mod.live_project_team(
-                    t, wpm, L, mlv.get(t.team_id), PROGM, week=wkm)
+                    t, wpm, L, mlv.get(t.team_id), PROGM, week=wkm,
+                    allowed=allowed_now(wkm))
             else:
                 mu, sd, _st = winprob_mod.project_team(t, wpm, L, week=wkm)
             proj[t.team_id] = (t, mu, sd)
+        _plab = "Proj now" if _lv_any else "Pregame"
         pairs = rosters_mod.all_matchups(L, wkm, tms)
         MLIVE = games_started(wkm)
         MST = kickoff_states(wkm)
@@ -1284,31 +1678,74 @@ with t_match:
         if not pairs:
             # Guillotine: no matchups, so the league IS the scoreboard and the
             # only thing that matters is distance from the bottom.
-            st.caption("Guillotine — no matchups. The lowest score is "
-                       "eliminated, so this is the whole field ranked, and the "
-                       "gap to the bottom is your real margin.")
-            order = sorted(proj.values(), key=lambda x: -x[1])
-            low = order[-1][1]
+            #
+            # ASCENDING. In a guillotine league only the bottom matters, so the
+            # bottom is where the eye should land: row 1 is the team currently
+            # going home. Sorted FIRST -- the head-to-head expanders below read
+            # from `order`, and building them before it existed raised
+            # NameError the moment this league had no pairs.
+            order = sorted(proj.values(), key=lambda x: x[1])
+            low = order[0][1]
+            second = order[1][1] if len(order) > 1 else low
             rws = []
             for i, (t, mu, sd) in enumerate(order, 1):
                 me_ = t.mine
                 cls = "good" if me_ else ""
+                # One meaning only: how far clear of the elimination line you
+                # are. Last place has no cushion, so it is 0.0 -- showing the
+                # distance to the next team up instead put two different
+                # quantities in one column. That distance is not lost: it is
+                # simply row 2's cushion.
                 marg = mu - low
                 mcls = ("bad" if marg < 8 else "warn" if marg < 20 else "good")
+                if i == 1:
+                    mcls = "bad"          # on the line
+                got_ = (mlv.get(t.team_id) or {}).get("total")
+                # STARTERS, not the whole roster. A bench player whose game has
+                # kicked off does not make the team's score meaningful -- only
+                # starters score, so checking `players` made a team with an
+                # already-played bench piece show 0.0 instead of a dash.
+                played = MLIVE and any(
+                    ls_mod.has_played(q.get("team"), MST)
+                    for q in (t.starters or []))
+                lcell = ""
+                if MLIVE:
+                    lcell = (f'<td class="ffnum">{got_:.1f}</td>'
+                             if played and got_ is not None
+                             else '<td class="ffnum dim">—</td>')
                 rws.append(
                     f'<tr style="{"background:rgba(74,222,128,.06)" if me_ else ""}">'
-                    f'<td class="dim">{i}</td>'
-                    f'<td class="{cls}"><b>{t.name}</b>'
+                    f'<td class="{"bad" if i == 1 else "dim"}">{i}</td>'
+                    f'<td class="{cls}"><b>{t.name}</b>{team_dot(t, MST)}'
                     f'{" ← you" if me_ else ""}</td>'
-                    f'<td class="ffnum">{mu:.1f}</td>'
-                    f'<td class="ffnum dim">±{sd:.0f}</td>'
-                    f'<td class="ffnum {mcls}">{marg:+.1f}</td></tr>')
+                    + lcell
+                    + f'<td class="ffnum">{mu:.1f}</td>'
+                      f'<td class="ffnum dim">±{sd:.0f}</td>'
+                      f'<td class="ffnum {mcls}">{marg:+.1f}</td></tr>')
             st.markdown('<div class="mu"><div class="ffwrap"><table class="fftable">'
-                        '<tr><th>#</th><th>Team</th><th class="ffnum">Pregame</th>'
-                        '<th class="ffnum">±</th>'
-                        '<th class="ffnum">vs last</th></tr>'
+                        '<tr><th>#</th><th>Team</th>'
+                        + ('<th class="ffnum">Current</th>' if MLIVE else '')
+                        + '<th class="ffnum">Projected</th>'
+                          '<th class="ffnum">±</th>'
+                          '<th class="ffnum">Cushion</th></tr>'
                         + "".join(rws) + '</table></div></div>',
                         unsafe_allow_html=True)
+
+            _me_t = next((t for t, _m, _s in proj.values() if t.mine), None)
+            if _me_t:
+                for t, mu, _sd in order:
+                    if t.team_id == _me_t.team_id:
+                        continue
+                    with st.expander(f"you  vs  {t.name}"):
+                        st.markdown(
+                            side_by_side(L, _me_t, t, wkm, mlv, PROGM, MST,
+                                         by_key, blob, scope="mu"),
+                            unsafe_allow_html=True)
+            st.caption("Guillotine — no matchups, so the whole field is the "
+                       "table. **Sorted worst first**: row 1 is the team "
+                       "currently going home. **Cushion** is how far clear of "
+                       "the elimination line you are — zero if you are on it. "
+                       "Row 2's cushion is therefore what row 1 has to make up.")
         else:
             rws = []
             for h, a_ in pairs:
@@ -1318,8 +1755,9 @@ with t_match:
                 ta_, am, asd = proj[a_]
                 pw = winprob_mod.head_to_head((hm, hs), (am, asd))
                 def _live_total(t):
+                    # Starters only -- see the note in the guillotine table.
                     if not any(ls_mod.has_played(q.get("team"), MST)
-                               for q in t.players):
+                               for q in (t.starters or [])):
                         return None
                     return (mlv.get(t.team_id) or {}).get("total")
                 hl, al = _live_total(th_), _live_total(ta_)
@@ -1329,7 +1767,8 @@ with t_match:
                 acls = "good" if pw < .5 else "bad"
                 rws.append(
                     f'<tr style="{hi}">'
-                    f'<td class="{"good" if th_.mine else ""}"><b>{th_.name}</b>'
+                    f'<td class="{"good" if th_.mine else ""}">'
+                    f'<b>{th_.name}</b>{team_dot(th_, MST)}'
                     f'{" ← you" if th_.mine else ""}</td>'
                     + (f'<td class="ffnum" style="font-size:16px;font-weight:700">'
                        f'{hl:.1f}</td>' if hl is not None else
@@ -1342,24 +1781,43 @@ with t_match:
                     + (f'<td class="ffnum" style="font-size:16px;font-weight:700">'
                        f'{al:.1f}</td>' if al is not None else
                        ('<td class="ffnum dim">—</td>' if MLIVE else ''))
-                    + f'<td class="{"good" if ta_.mine else ""}"><b>{ta_.name}</b>'
+                    + f'<td class="{"good" if ta_.mine else ""}">'
+                      f'<b>{ta_.name}</b>{team_dot(ta_, MST)}'
                     f'{" ← you" if ta_.mine else ""}</td></tr>')
             st.markdown('<div class="mu"><div class="ffwrap"><table class="fftable">'
                         + ('<tr><th>Home</th>'
                            + ('<th class="ffnum">Current</th>' if MLIVE else '')
-                           + '<th class="ffnum">Pregame</th>'
+                           # The value in this column is live_project_team once
+                           # anything has kicked off, so the header has to say so
+                           # -- it read "Pregame" while showing a decaying number.
+                           + f'<th class="ffnum">{_plab}</th>'
                              '<th class="ffnum">Win</th><th></th>'
-                             '<th class="ffnum">Win</th><th class="ffnum">Pregame</th>'
+                             f'<th class="ffnum">Win</th><th class="ffnum">{_plab}</th>'
                            + ('<th class="ffnum">Current</th>' if MLIVE else '')
                            + '<th>Away</th></tr>')
                         + "".join(rws) + '</table></div></div>',
                         unsafe_allow_html=True)
-            st.caption("Every game this week, scored under this league's rules. "
-                       "Odds come from the same distribution as your own "
-                       "matchup, so they are directly comparable. **Pregame** is "
-                       "the projection published before kickoff — it does NOT "
-                       "decay as games play, so mid-Sunday read it as where the "
-                       "week started, not where it is heading.")
+            for h, a_ in pairs:
+                if h not in proj or a_ not in proj:
+                    continue
+                th_, hm, _hs = proj[h]
+                ta_, am, _as = proj[a_]
+                mark = " ←" if (th_.mine or ta_.mine) else ""
+                with st.expander(f"{th_.name}  vs  {ta_.name}{mark}"):
+                    st.markdown(
+                        side_by_side(L, th_, ta_, wkm, mlv, PROGM, MST,
+                                     by_key, blob, scope="mu"),
+                        unsafe_allow_html=True)
+            st.caption(
+                "Every game this week, scored under this league's rules. Odds "
+                "come from the same distribution as your own matchup, so they "
+                "are directly comparable. " + (
+                    "**Proj now** is points banked plus what is still projected "
+                    "from the football left, so it moves all day and is directly "
+                    "comparable to the totals on the lineup and home pages."
+                    if _lv_any else
+                    "**Pregame** is the projection published before kickoff; it "
+                    "starts decaying into a live number once games begin."))
 
         st.subheader("Where you stand")
         order = sorted(proj.values(), key=lambda x: -x[1])
@@ -1476,7 +1934,7 @@ with t_waiver:
             st.subheader("What to bid")
             bud = faab_balance(L.name) or 0
             wl = max(1, regular_weeks(L.name) - week + 1)
-            rep_ = build_report(L.name, week)
+            rep_ = report(L.name, week)
             sea_ = rep_.get("season_odds") or {}
             alive = max(1.0, sea_.get("weeks_survived", wl))
             c1, c2, c3 = st.columns(3)

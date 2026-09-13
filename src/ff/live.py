@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import time
 
 import requests
 
@@ -191,16 +192,69 @@ def player_lines(event_id: str) -> dict:
     return {k: " · ".join(v) for k, v in out.items()}
 
 
-def my_holdings(leagues, week: int, blob=None) -> dict:
-    """{NFL team: [{player, position, league, starter}]} across ALL your leagues.
+def _team_rows(L, team, week, blob, extra) -> dict:
+    """One fantasy team's roster, grouped by the NFL team each player is on.
+
+    Built through `lineup.build_pool` rather than `weekly_points` directly:
+    weekly_points carries no defenses at all (they are priced in
+    `special.dst_week`), so every D/ST on this page projected 0.0 and the
+    Sunday numbers disagreed with the lineup and matchup pages.
+
+    `starter` is the lineup actually SET on the platform, falling back to the
+    optimiser only where the platform publishes no starters -- the same
+    preference the rest of the app makes. Using the optimiser's answer meant
+    this page could call a man a starter while your real lineup benched him.
+    """
+    from .lineup import build_pool, optimize
+    from .names import key as nkey
+
+    def _pos(q):
+        pos = (q.get("position") or "").upper()
+        return "DST" if pos in ("DEF", "D/ST") else pos
+
+    pool = build_pool(L, team.players, week, None, blob)
+    starters = {nkey(q["name"], _pos(q)) for q in (team.starters or [])
+                if q.get("name")}
+    if not starters:
+        try:
+            filled, _ = optimize(pool, L)
+            starters = {nkey(p["name"], p["position"])
+                        for v in filled.values() for p in v}
+        except Exception:
+            starters = set()
+
+    out = {}
+    for p in pool:
+        nfl = _norm(p.get("team"))
+        if not nfl:
+            continue
+        k = nkey(p["name"], p.get("position"))
+        out.setdefault(nfl, []).append({
+            "player": p["name"], "position": p.get("position"),
+            "league": L.name,
+            "starter": k in starters,
+            "proj": round(p.get("week_points") or 0, 1),
+            "nfl_team": nfl,
+            # Carried so the caller can join this row to a live score without
+            # re-reading the roster: the platform's team id, and the name key
+            # its per-player scores are filed under.
+            "team_id": getattr(team, "team_id", None), "key": k, **extra})
+    return out
+
+
+def holdings(leagues, week: int, blob=None, sides=("mine",)) -> dict:
+    """{NFL team: [player rows]} across ALL your leagues, optionally both sides.
 
     Cross-league on purpose. Your Sunday isn't organised by league -- it's
     organised by which games are on, and a player you roster three times is
     three times as much of your afternoon.
+
+    With "opp" in `sides` each league's current opponent is included too, tagged
+    `side="opp"`, so a game can be read as what it actually is: some of it
+    helping you and some of it beating you. Guillotine leagues contribute no
+    opponent rows -- there is no rival there, you play the field.
     """
     from . import rosters
-    from .lineup import optimize, weekly_points
-    from .names import key as nkey
 
     out = {}
     for L in leagues:
@@ -213,25 +267,69 @@ def my_holdings(leagues, week: int, blob=None) -> dict:
         mine = next((t for t in teams if t.mine), None)
         if not mine:
             continue
-        try:
-            wpts = weekly_points(week, L.scoring)
-        except Exception:
-            wpts = {}
-        pool = []
-        for p in mine.players:
-            pts, *_ = wpts.get(nkey(p["name"], p.get("position")), (0.0, 0, 0.0))
-            pool.append({**p, "week_points": pts})
-        try:
-            filled, _ = optimize(pool, L)
-            starting = {p["name"] for slot in filled.values() for p in slot}
-        except Exception:
-            starting = set()
-        for p in pool:
-            team = _norm(p.get("team"))
-            if not team:
+        want = []
+        if "mine" in sides:
+            want.append((mine, {"side": "mine", "who": "you"}))
+        if "opp" in sides:
+            try:
+                opp = rosters.opponent_of(L, week, teams)
+            except Exception:
+                opp = None
+            if opp is not None:
+                want.append((opp, {"side": "opp", "who": opp.name}))
+        for team, extra in want:
+            try:
+                rows = _team_rows(L, team, week, blob, extra)
+            except Exception:
                 continue
-            out.setdefault(team, []).append({
-                "player": p["name"], "position": p.get("position"),
-                "league": L.name, "starter": p["name"] in starting,
-                "proj": round(p.get("week_points") or 0, 1)})
+            for nfl, rs in rows.items():
+                out.setdefault(nfl, []).extend(rs)
+    return out
+
+
+def my_holdings(leagues, week: int, blob=None) -> dict:
+    """Your players only. Thin wrapper -- see holdings()."""
+    return holdings(leagues, week, blob, sides=("mine",))
+
+
+@functools.lru_cache(maxsize=64)
+def _summary(event_id: str, _bucket: int) -> dict:
+    r = requests.get(SUMMARY, params={"event": event_id}, headers=UA, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def allowed(games_list: list[dict], ttl_seconds: int = 45) -> dict:
+    """{TEAM: (points allowed, yards allowed)} so far, for IN-PROGRESS games.
+
+    A defense's points-allowed and yards-allowed tiers are not accrued the way a
+    sack is -- they are a running verdict on the OPPONENT's game, re-read every
+    snap. To project them you need the opponent's current score and yardage,
+    which is what this fetches.
+
+    Only live games are requested: a finished game's tiers are already settled in
+    the score, and a game that hasn't kicked off has nothing to report.
+    """
+    bucket = int(time.time() // max(1, ttl_seconds))
+    out = {}
+    for g in (games_list or []):
+        if g.get("state") != "in" or not g.get("id"):
+            continue
+        try:
+            js = _summary(str(g["id"]), bucket)
+        except Exception:
+            continue
+        yards = {}
+        for t in (js.get("boxscore") or {}).get("teams") or []:
+            ab = _norm((t.get("team") or {}).get("abbreviation"))
+            for st in (t.get("statistics") or []):
+                if st.get("name") == "totalYards":
+                    try:
+                        yards[ab] = float(str(st.get("displayValue") or 0).replace(",", ""))
+                    except ValueError:
+                        pass
+        home, away = g.get("home"), g.get("away")
+        # A defense ALLOWS what the other side has produced.
+        out[home] = (float(g.get("away_score") or 0), yards.get(away))
+        out[away] = (float(g.get("home_score") or 0), yards.get(home))
     return out

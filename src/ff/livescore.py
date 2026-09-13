@@ -15,6 +15,7 @@ tighter poll just rate-limits you on a Sunday afternoon.
 """
 from __future__ import annotations
 
+import functools
 import time
 
 import requests
@@ -81,42 +82,82 @@ def _sleeper(league, week, blob):
 
 
 def _espn(league, week, blob):
+    """Live actuals from mRoster, NOT mMatchupScore.
+
+    mMatchupScore's roster entries carry only a lineup slot and a bare stats
+    array -- no player id and no name -- so every entry was unidentifiable and
+    silently skipped, leaving ESPN with a team total and nothing else. mRoster
+    with an explicit scoringPeriodId returns the same live numbers WITH names
+    and slots: `statSourceId` 0 is the actual, 1 the projection.
+    """
     ck = {"espn_s2": _env("ESPN_S2"), "SWID": _env("ESPN_SWID")}
     url = (f"{ESPN}/seasons/2026/segments/0/leagues/{league.league_id}"
-           f"?view=mMatchupScore&scoringPeriodId={week}")
+           f"?view=mRoster&view=mTeam&scoringPeriodId={week}")
     d = requests.get(url, headers=UA, cookies=ck, timeout=40).json()
     POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
     out = {}
-    for m in (d.get("schedule") or []):
-        if m.get("matchupPeriodId") != week:
-            continue
-        for side in ("home", "away"):
-            t = m.get(side) or {}
-            tid = t.get("teamId")
-            if tid is None:
+    for t in (d.get("teams") or []):
+        players, started = {}, {}
+        total = 0.0
+        for e in ((t.get("roster") or {}).get("entries") or []):
+            pp = ((e.get("playerPoolEntry") or {}).get("player") or {})
+            nm = pp.get("fullName")
+            if not nm:
                 continue
-            players, started = {}, {}
-            roster = (t.get("rosterForCurrentScoringPeriod") or {})
-            for e in (roster.get("entries") or []):
-                pp = ((e.get("playerPoolEntry") or {}).get("player") or {})
-                nm = pp.get("fullName")
-                if not nm:
-                    continue
-                pos = POS.get(pp.get("defaultPositionId"))
-                pts = 0.0
-                for st in (pp.get("stats") or []):
-                    if (st.get("scoringPeriodId") == week
-                            and st.get("statSourceId") == 0):     # 0 = actual
-                        pts = float(st.get("appliedTotal") or 0)
-                k = nkey(nm, pos)
-                players[k] = pts
-                if e.get("lineupSlotId") not in (20, 21):
-                    started[k] = pts
-            out[str(tid)] = {
-                "total": float(roster.get("appliedStatTotal")
-                               or t.get("totalPoints") or 0),
-                "players": players, "starters": started}
+            pos = POS.get(pp.get("defaultPositionId"))
+            pts = 0.0
+            for stt in (pp.get("stats") or []):
+                if (stt.get("scoringPeriodId") == week
+                        and stt.get("statSourceId") == 0):     # 0 = actual
+                    pts = float(stt.get("appliedTotal") or 0)
+            k = nkey(nm, pos)
+            players[k] = pts
+            if e.get("lineupSlotId") not in (20, 21):          # bench / IR
+                started[k] = pts
+                total += pts
+        out[str(t.get("id"))] = {"total": round(total, 2),
+                                 "players": players, "starters": started}
     return out
+
+
+def _yahoo_players(league, team_key: str, week: int) -> tuple[dict, dict]:
+    """(all players, starters only) -> points, for one Yahoo team.
+
+    The league scoreboard gives a team total but no breakdown, which left every
+    Yahoo player showing 0 scored. `roster/players/stats` carries per-player
+    `player_points` and the slot each was started in.
+    """
+    from . import yahoo
+    players, started = {}, {}
+    d = yahoo.get(f"/team/{team_key}/roster/players/stats;type=week;week={week}")
+    node = d["fantasy_content"]["team"][1]["roster"]["0"]["players"]
+    for k, v in node.items():
+        if k == "count":
+            continue
+        pl = v["player"]
+        info = {}
+        for bit in pl[0]:
+            if isinstance(bit, dict):
+                info.update(bit)
+        nm = (info.get("name") or {}).get("full")
+        pos = info.get("display_position")
+        if not nm:
+            continue
+        pts, slot = 0.0, None
+        for bit in pl[1:]:
+            if not isinstance(bit, dict):
+                continue
+            if "player_points" in bit:
+                pts = float(bit["player_points"].get("total") or 0)
+            if "selected_position" in bit:
+                for s_ in bit["selected_position"]:
+                    if isinstance(s_, dict) and "position" in s_:
+                        slot = s_["position"]
+        kk = nkey(nm, "DST" if pos == "DEF" else pos)
+        players[kk] = pts
+        if slot and slot not in ("BN", "IR", "IL"):
+            started[kk] = pts
+    return players, started
 
 
 def _yahoo(league, week, blob):
@@ -143,8 +184,14 @@ def _yahoo(league, week, blob):
             for bit in parts[1:]:
                 if isinstance(bit, dict) and "team_points" in bit:
                     pts = float(bit["team_points"].get("total") or 0)
-            out[str(info.get("team_id"))] = {
-                "total": pts, "players": {}, "starters": {}}
+            tid = str(info.get("team_id"))
+            players = started = {}
+            try:
+                players, started = _yahoo_players(
+                    league, info.get("team_key") or f"{lk}.t.{tid}", week)
+            except Exception:
+                pass          # totals still work; only the breakdown is lost
+            out[tid] = {"total": pts, "players": players, "starters": started}
     return out
 
 
@@ -191,13 +238,58 @@ def team_states(games_list: list[dict]) -> dict:
     return out
 
 
+@functools.lru_cache(maxsize=1)
+def _rev_aliases() -> dict:
+    from .starts import TEAM_ALIASES
+    out = {}
+    for k, v in TEAM_ALIASES.items():
+        out.setdefault(v, []).append(k)
+    return out
+
+
+def _codes(team: str | None) -> list[str]:
+    """Every spelling of one NFL team, so a lookup resolves whichever the other
+    side happened to use.
+
+    The two alias tables in this repo disagree in DIRECTION: `starts.TEAM_ALIASES`
+    maps JAC -> JAX, while `live.ALIAS` maps JAX -> JAC. Game states are keyed by
+    the latter, so a roster saying "Jax" (Yahoo spells it that way) translated to
+    JAX, missed the JAC key entirely, and every Jaguar read as though his game had
+    not kicked off -- a defense sitting on 21.5 points showed a dash all afternoon.
+    Resolving BOTH directions here means neither table has to win.
+    """
+    from .starts import TEAM_ALIASES
+    t = str(team or "").upper()
+    if not t:
+        return []
+    seen, out = set(), []
+    for c in [t, TEAM_ALIASES.get(t)] + _rev_aliases().get(t, []):
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+
+def pick(team: str | None, d: dict, default=None):
+    """Look one NFL team up in a team-keyed dict, trying every spelling.
+
+    Public because callers outside this module keep re-deriving it from
+    `starts.TEAM_ALIASES` and getting the direction wrong -- which is exactly
+    how a Jacksonville defense went on reading its phantom 20-point baseline
+    after the alias bug was supposedly fixed.
+    """
+    for c in _codes(team):
+        if c in d:
+            return d[c]
+    return default
+
 def has_played(team: str | None, states: dict) -> bool:
     """True once his game has started; False while it is still 'pre'."""
-    from .starts import TEAM_ALIASES
-    if not team:
-        return False
-    t = str(team).upper()
-    return states.get(TEAM_ALIASES.get(t, t), states.get(t, "pre")) != "pre"
+    for c in _codes(team):
+        if c in states:
+            return states[c] != "pre"
+    return False
 
 
 # A regulation game is four 15-minute quarters. Overtime is ignored on purpose:
@@ -242,10 +334,17 @@ def game_progress(games_list: list[dict]) -> dict:
 
 def remaining(team: str | None, progress: dict) -> float:
     """Fraction of this player's game still to play; 1.0 if unknown."""
-    from .starts import TEAM_ALIASES
-    if not team:
-        return 1.0
-    t = str(team).upper()
-    if t in progress:
-        return progress[t]
-    return progress.get(TEAM_ALIASES.get(t, t), 1.0)
+    for c in _codes(team):
+        if c in progress:
+            return progress[c]
+    return 1.0
+
+
+def is_playing(team: str | None, states: dict) -> bool:
+    """On the field RIGHT NOW -- distinct from has_played(), which stays true
+    after the final whistle. Drives the live dot, which should go out when the
+    game ends rather than implying he is still accumulating."""
+    for c in _codes(team):
+        if c in states:
+            return states[c] == "in"
+    return False

@@ -201,13 +201,32 @@ def _yahoo(league) -> list[Team]:
 
 
 # ---------------------------------------------------------------------------
+def _canon_names(teams: list[Team]) -> list[Team]:
+    """One spelling per player, whichever platform this roster came from.
+
+    Applied here rather than in each reader because this is where all three
+    converge, and because everything downstream -- lineups, holdings, the
+    Sunday board, win probability -- reads its display name from these dicts.
+    Joins are unaffected: `names.normalize` already folded the suffix away, so
+    this only settles what gets PRINTED. Without it the same man showed up as
+    "Travis Etienne" and "Travis Etienne Jr." two rows apart.
+    """
+    from .names import display
+    for t in teams:
+        for group in (t.players or [], t.starters or []):
+            for p in group:
+                if p.get("name"):
+                    p["name"] = display(p["name"])
+    return teams
+
+
 def all_teams(league, week: int, players_blob: dict | None = None) -> list[Team]:
     if league.platform == "sleeper":
-        return _sleeper(league, players_blob or {})
+        return _canon_names(_sleeper(league, players_blob or {}))
     if league.platform == "espn":
-        return _espn(league, week, players_blob or {})
+        return _canon_names(_espn(league, week, players_blob or {}))
     if league.platform == "yahoo":
-        return _yahoo(league)
+        return _canon_names(_yahoo(league))
     raise RuntimeError(f"no roster reader for {league.platform}")
 
 

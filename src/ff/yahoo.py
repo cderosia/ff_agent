@@ -126,14 +126,30 @@ def league_settings(league_key: str) -> dict:
     }
 
 
-# Yahoo stat_id -> this codebase's canonical name. Offence only; DST scoring is
-# bucketed (points-allowed tiers) and doesn't survive translation, so defenses
-# are valued in ff.special instead.
+# Yahoo stat_id -> this codebase's canonical name.
+#
+# The DST half used to be dropped here on the grounds that bucketed
+# points-allowed tiers "don't survive translation". They survive fine as named
+# tiers, and dropping them was expensive: a defense was priced off Sleeper's
+# generic half-PPR number instead of this league's rules, and -- worse -- live
+# scoring had no way to tell that Yahoo credits BOTH top tiers (Pts Allow 0 and
+# Yds Allow 0-99) before a snap is played. That is 20 points of phantom baseline
+# which decays to roughly zero in an average game, and the live projection was
+# treating it as banked and adding a full pregame projection on top of it.
 YAHOO_STAT = {
     "4": "pass_yds", "5": "pass_td", "6": "pass_int",
     "9": "rush_yds", "10": "rush_td",
     "11": "receptions", "12": "rec_yds", "13": "rec_td",
     "15": "ret_td", "16": "two_pt", "18": "fum_lost", "57": "fum_ret_td",
+    # --- defense / special teams: events, which accrue as the game goes ---
+    "32": "def_sack", "33": "def_int", "34": "def_fum_rec",
+    "35": "def_td", "36": "def_safety", "37": "def_blk_kick",
+    "49": "def_ret_td",
+    # --- defense: STATE tiers, re-evaluated continuously, never banked ---
+    "50": "pa_0", "51": "pa_1_6", "52": "pa_7_13", "53": "pa_14_20",
+    "54": "pa_21_27", "55": "pa_28_34", "56": "pa_35",
+    "71": "ya_0_99", "72": "ya_100_199", "73": "ya_200_299",
+    "74": "ya_300_399", "75": "ya_400_499", "76": "ya_500",
 }
 
 # Yahoo's slot names -> ours.

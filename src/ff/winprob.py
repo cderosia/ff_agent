@@ -259,7 +259,8 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
 
 
 def live_project_team(team, week_pts: dict, league, live_row: dict | None,
-                      progress: dict, week: int | None = None
+                      progress: dict, week: int | None = None,
+                      allowed: dict | None = None
                       ) -> tuple[float, float, list]:
     """(mean, sd, per-player detail) for a team MID-WEEK.
 
@@ -282,9 +283,9 @@ def live_project_team(team, week_pts: dict, league, live_row: dict | None,
     points come from who is in the slots, not from who should be.
     """
     from .lineup import optimize
-    from .livescore import remaining
+    from .livescore import remaining, pick
     from .names import key as nkey
-    from .special import dst_week
+    from .special import dst_week, live_points
 
     dsts = dst_week(week) if week else {}
     scored = (live_row or {}).get("starters") or {}
@@ -304,26 +305,47 @@ def live_project_team(team, week_pts: dict, league, live_row: dict | None,
     else:
         _mu, _sd, starters = project_team(team, week_pts, league, week=week)
 
-    mu = 0.0
     var = 0.0
     detail = []
+    remaining_mu = 0.0
     for p in starters:
         proj = p.get("week_points") or 0.0
         f = remaining(p.get("team"), progress)
         got = scored.get(nkey(p["name"], p.get("position")))
         got = 0.0 if got is None else float(got)
-        m = got + proj * f
+        # What this player adds ON TOP of what is already banked. For everyone
+        # but a defense that is simply his projection scaled by the football
+        # left. A defense's banked score includes points-allowed tiers that are
+        # not banked at all -- 20 of them credited before kickoff in a league
+        # that scores both top buckets -- so it gets the tier-aware rule and
+        # contributes the difference between its true projection and what the
+        # platform has already credited it. Without this the phantom baseline
+        # was counted once in `banked` and a full projection added on top.
+        lp = live_points(league.scoring, p.get("position"), got, proj, f,
+                         pick(p.get("team"), allowed or {}))
+        remaining_mu += lp - got
         sd = player_sd(proj, p.get("position")) * (f ** 0.5)
-        mu += m
         var += sd ** 2
         detail.append({**p, "scored": got, "remaining": f,
-                       "live_proj": round(m, 1)})
+                       "live_proj": round(lp, 1)})
+
+    # Banked points come from the TEAM TOTAL where the platform gives one,
+    # not from summing per-player scores. Yahoo reports a team total but no
+    # per-player breakdown, so summing players credited zero to everyone while
+    # still docking each projection for time elapsed -- a team that had scored
+    # 20 points read as though it had scored none and lost a quarter of its
+    # projection as well. The two agree wherever per-player data exists.
+    banked = (live_row or {}).get("total")
+    if banked is None:
+        banked = sum(d["scored"] for d in detail)
+    mu = float(banked) + remaining_mu
     return mu, var ** 0.5, detail
 
 
 def league_odds(teams, week_pts: dict, league, opponent=None,
                 week: int | None = None, live: dict | None = None,
-                progress: dict | None = None) -> dict:
+                progress: dict | None = None,
+                allowed: dict | None = None) -> dict:
     """Your odds this week: head-to-head, or survival in a guillotine league.
 
     With `live` (per-team actual scores) and `progress` (fraction of each NFL
@@ -338,7 +360,7 @@ def league_odds(teams, week_pts: dict, league, opponent=None,
         if progress:
             mu, sd, starters = live_project_team(
                 t, week_pts, league, (live or {}).get(t.team_id), progress,
-                week=week)
+                week=week, allowed=allowed)
         else:
             mu, sd, starters = project_team(t, week_pts, league, week=week)
         dists.append((mu, sd))

@@ -175,3 +175,108 @@ def dst_week(week: int, season: int = SEASON) -> dict:
         if team and pts is not None:
             out[team.upper()] = float(pts)
     return out
+
+
+# Points-allowed and yards-allowed tiers, as (lower, upper, canonical key).
+# Upper bound None means open-ended.
+PA_TIERS = [(0, 0, "pa_0"), (1, 6, "pa_1_6"), (7, 13, "pa_7_13"),
+            (14, 20, "pa_14_20"), (21, 27, "pa_21_27"),
+            (28, 34, "pa_28_34"), (35, None, "pa_35")]
+YA_TIERS = [(0, 99, "ya_0_99"), (100, 199, "ya_100_199"),
+            (200, 299, "ya_200_299"), (300, 399, "ya_300_399"),
+            (400, 499, "ya_400_499"), (500, None, "ya_500")]
+
+# League-average offensive output, used to extrapolate what a defense will have
+# allowed by the final whistle. Rough figures, and stated as assumptions rather
+# than measurements: ~22 points and ~340 yards per team per game.
+AVG_PPG = 22.0
+AVG_YPG = 340.0
+
+
+def tier_value(amount: float | None, tiers, scoring: dict) -> float:
+    """Points from a bucketed tier, or 0.0 where the league doesn't use them."""
+    if amount is None:
+        return 0.0
+    for lo, hi, key_ in tiers:
+        if amount >= lo and (hi is None or amount <= hi):
+            return float(scoring.get(key_) or 0.0)
+    return 0.0
+
+
+def has_tiers(scoring: dict) -> bool:
+    """True where this league scores defenses on points/yards-allowed tiers."""
+    return any(k in scoring for _l, _h, k in PA_TIERS + YA_TIERS)
+
+
+def dst_live(scoring: dict, scored: float, allowed_now, frac_left: float,
+             pregame: float | None = None) -> float:
+    """A defense's projected FINAL score, mid-game, without the phantom baseline.
+
+    A defense is not one accumulating quantity but two of quite different kinds:
+
+      * EVENTS -- sacks, interceptions, fumble recoveries, touchdowns. These
+        accrue as the game goes, and what is banked stays banked.
+      * STATE TIERS -- points allowed and yards allowed. These are a running
+        verdict re-read every snap, and they can be TAKEN AWAY. At kickoff a
+        defense has allowed nothing, so it sits in the top bucket of both:
+        under this repo's Yahoo league that is 10 + 10 = 20 points credited
+        before a snap is played, decaying to about zero in an average game.
+
+    Treating the second kind as banked and adding a full pregame projection on
+    top of it is what made a defense read 29.6 in the first quarter against a
+    pregame 9.1. So: strip the tier points out of what is "scored" using the
+    CURRENT state, project the final state forward at league-average rates, and
+    re-price the tiers there. Events are left to accrue.
+
+    `allowed_now` is (points, yards) conceded so far, or None before kickoff.
+    Returns the pregame number unchanged when the league has no tiers (every
+    platform but Yahoo here) or when nothing has kicked off.
+    """
+    pre = float(pregame or 0.0)
+    if not has_tiers(scoring) or allowed_now is None:
+        return float(scored) + pre * float(frac_left)
+
+    pa_now, ya_now = allowed_now
+    pa_now = float(pa_now or 0.0)
+    # Yards can be missing even mid-game; fall back to the league-average pace
+    # so the tier is priced off a plausible state rather than a flattering one.
+    elapsed = max(0.0, 1.0 - float(frac_left))
+    ya_now = float(ya_now) if ya_now is not None else AVG_YPG * elapsed
+
+    tiers_now = (tier_value(pa_now, PA_TIERS, scoring)
+                 + tier_value(ya_now, YA_TIERS, scoring))
+    # Floored at zero: no event category in these leagues is worth negative
+    # points, so a negative here means only that the score and the boxscore were
+    # read a moment apart. Without the floor that skew lands in the projection.
+    events_now = max(0.0, float(scored) - tiers_now)
+
+    pa_end = pa_now + AVG_PPG * float(frac_left)
+    ya_end = ya_now + AVG_YPG * float(frac_left)
+    tiers_end = (tier_value(pa_end, PA_TIERS, scoring)
+                 + tier_value(ya_end, YA_TIERS, scoring))
+
+    # Events still to come. The pregame projection is a whole-game number that
+    # already includes an expected tier value, so it cannot be used directly;
+    # what is left of it after removing an average game's tiers is the event
+    # part, and that is what accrues over the rest of the clock.
+    avg_tiers = (tier_value(AVG_PPG, PA_TIERS, scoring)
+                 + tier_value(AVG_YPG, YA_TIERS, scoring))
+    event_rate = max(0.0, pre - avg_tiers)
+    return events_now + event_rate * float(frac_left) + tiers_end
+
+
+def live_points(scoring: dict, position: str | None, scored: float,
+                pregame: float | None, frac_left: float,
+                allowed_now=None) -> float:
+    """One player's projected final score mid-game. THE live-projection rule.
+
+    Everything that shows a "proj now" anywhere in the app goes through here, so
+    a player cannot read one number on the lineup page and another on the
+    scoreboard. Ordinary players accrue linearly; defenses do not, and get the
+    tier-aware treatment in dst_live().
+    """
+    pos = (position or "").upper()
+    pos = "DST" if pos in ("DEF", "D/ST") else pos
+    if pos == "DST":
+        return dst_live(scoring, scored, allowed_now, frac_left, pregame)
+    return float(scored) + float(pregame or 0.0) * float(frac_left)

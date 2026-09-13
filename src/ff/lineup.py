@@ -464,6 +464,11 @@ def actual_vs_optimal(pool: list[dict], filled: dict, actual: list[dict]) -> dic
             "out_slot": out_p.get("slot", ""), "out_status": out_p.get("status", ""),
             "out_why": out_p.get("why", ""),
             "in": in_p["name"], "in_pts": round(in_p.get("week_points", 0), 1),
+            # Both pro teams, so a caller can tell whether this swap is still
+            # LEGAL. A lineup locks player by player as games kick off: once
+            # either man's game has started the move cannot be made, and
+            # printing it as a to-do is asking for something impossible.
+            "out_team": out_p.get("team"), "in_team": in_p.get("team"),
             "gain": round(in_p.get("week_points", 0) - out_p.get("week_points", 0), 1)})
 
     # A player who is both unavailable AND already being swapped out is ONE
