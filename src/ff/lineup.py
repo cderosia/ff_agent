@@ -457,8 +457,31 @@ def actual_vs_optimal(pool: list[dict], filled: dict, actual: list[dict]) -> dic
                       key=lambda p: -p.get("week_points", 0))
     sit_out = sorted((p for p in started if nkey(p["name"], p["position"]) not in opt_names),
                      key=lambda p: p.get("week_points", 0))
+    # Pair each man coming OUT with someone who can actually fill his slot.
+    #
+    # This used to be zip(sit_out, bench_in) -- two lists matched by rank, with
+    # no eligibility check at all. sit_out is sorted worst-first and bench_in
+    # best-first, so a two-change lineup got CROSSED: 719 was told to start Bo
+    # Nix (QB) over Travis Etienne in the FLEX, and Mike Evans (WR) at QB over
+    # Baker Mayfield. Both moves are illegal and the right pairing was sitting
+    # right there -- Nix for Mayfield, Evans for Etienne.
+    #
+    # Greedy and worst-starter-first: bench_in is already sorted best-first, so
+    # the first eligible man is the best available for that slot. A starter with
+    # no eligible replacement yields no swap rather than a nonsense one.
     swaps = []
-    for out_p, in_p in zip(sit_out, bench_in):
+    taken_in: set[int] = set()
+    pairs = []
+    for out_p in sit_out:
+        slot = out_p.get("slot") or out_p.get("position")
+        elig = SLOT_ELIGIBILITY.get(slot, {slot})
+        pick = next((i for i, p in enumerate(bench_in)
+                     if i not in taken_in and p.get("position") in elig), None)
+        if pick is None:
+            continue
+        taken_in.add(pick)
+        pairs.append((out_p, bench_in[pick]))
+    for out_p, in_p in pairs:
         swaps.append({
             "out": out_p["name"], "out_pts": round(out_p.get("week_points", 0), 1),
             "out_slot": out_p.get("slot", ""), "out_status": out_p.get("status", ""),
