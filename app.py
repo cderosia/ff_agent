@@ -141,7 +141,20 @@ def nfl_state() -> dict:
 
 
 def _default_week() -> int:
-    w = nfl_state().get("display_week") or nfl_state().get("week")
+    """The week every page opens on.
+
+    Sleeper publishes two of these and they disagree for about a day.
+    `display_week` lags on purpose -- it holds on the week you just played
+    while Monday night settles -- and `week` advances Tuesday morning. This app
+    is for deciding what to do NEXT, and by Tuesday the previous week's results
+    are final and waivers are clearing, so it follows `week`.
+
+    Every page defaults from here (Home, Sunday, Lineup, Matchups, Waivers,
+    Donuts), so they all turn over together. Each keeps its own week control
+    for looking back.
+    """
+    st_ = nfl_state()
+    w = st_.get("week") or st_.get("display_week")
     if w:
         return max(1, int(w))
     ls, _ = leagues_objects()
@@ -274,7 +287,9 @@ for nm, err in errors:
 st.sidebar.divider()
 _ns = nfl_state()
 st.sidebar.caption(
-    f"**{_ns.get('season','2026')} week {_ns.get('display_week','?')}** "
+    # _default_week(), not display_week: this line names the week every page is
+    # actually showing, and the two disagree for about a day after Monday night.
+    f"**{_ns.get('season','2026')} week {_default_week()}** "
     f"({_ns.get('season_type','')}). Rosters are read live from each platform. "
     "Usage trends fall back to 2025 until this season has games; every tab "
     "that does says so."
