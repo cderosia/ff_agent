@@ -60,5 +60,12 @@ def display(name: str | None) -> str:
 
 
 def key(name: str, position: str) -> tuple[str, str]:
-    """Join key including position, which disambiguates same-name players."""
-    return (normalize(name), (position or "").upper())
+    """Join key including position, which disambiguates same-name players.
+
+    Tolerates a missing position. `(position or "")` is not enough: a frame read
+    from parquet hands back float NaN for a blank cell, NaN is truthy, and
+    `.upper()` on it raises -- which is how one junk row in nflverse's export
+    took down the whole accuracy report.
+    """
+    pos = position if isinstance(position, str) else ""
+    return (normalize(name), pos.upper())

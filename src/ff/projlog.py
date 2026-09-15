@@ -224,9 +224,11 @@ def accuracy(season: int = SEASON, weeks: Iterable[int] | None = None,
         return {"error": f"no completed {season} games to compare against yet — "
                          f"{len(proj)} projection rows are banked and waiting"}
 
-    proj = proj.copy()
+    # A row with no name cannot be joined to anything. nflverse ships one such
+    # row per season export; keeping it only produces a key that matches nothing.
+    proj = proj[proj.name.notna()].copy()
+    act = act[act.name.notna()].copy()
     proj["k"] = [nkey(n, p) for n, p in zip(proj.name, proj.position)]
-    act = act.copy()
     act["k"] = [nkey(n, p) for n, p in zip(act.name, act.position)]
 
     sc = scoring or REF_PPR
