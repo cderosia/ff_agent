@@ -282,6 +282,21 @@ def opponent_of(league, week: int, teams: list[Team]) -> Team | None:
     return next((t for t in teams if t.team_id == oid), None)
 
 
+def active_teams(teams: list[Team]) -> list[Team]:
+    """Teams still in the league.
+
+    A guillotine league keeps an eliminated manager's ROW -- Yahoo goes on
+    returning him all season -- but strips his roster to nothing. He therefore
+    projects 0.0, and any comparison against "the field" that includes him is
+    measuring the wrong thing: he was the lowest scorer, permanently, and the
+    live question is who is lowest among the people still playing.
+
+    Left as a filter rather than done inside all_teams() because reading a past
+    week, or a team's final roster, still legitimately wants every row.
+    """
+    return [t for t in teams if (t.players or [])]
+
+
 def has_drafted(league, teams: list[Team]) -> bool:
     """Whether this league's CURRENT season has actually drafted.
 

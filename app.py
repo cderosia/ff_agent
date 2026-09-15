@@ -573,8 +573,11 @@ def build_report(league_name: str, week: int, bust: int = 0):
         _prog = game_progress(week)
         _any_live = any(v < 1.0 for v in (_prog or {}).values())
         _livesc = ls_mod.scores(L_, week, blob) if _any_live else {}
+        # The field means the teams still IN it. An eliminated manager keeps
+        # his row and loses his roster, so leaving him in compares you against
+        # a permanent 0.0 and reports a cushion you do not have.
         odds = winprob_mod.league_odds(
-            teams, wp, L_, opponent=opp, week=week,
+            rosters_mod.active_teams(teams), wp, L_, opponent=opp, week=week,
             live=_livesc if _any_live else None,
             progress=_prog if _any_live else None,
             allowed=allowed_now(week) if _any_live else None)
@@ -1120,7 +1123,7 @@ if nav == "Home":
                 # against whoever is currently last.
                 wpx = lineup_mod.weekly_points(wk_all, L_.scoring)
                 lowest, lo = None, None
-                for t in tms_:
+                for t in rosters_mod.active_teams(tms_):
                     mu, _s, _d = winprob_mod.live_project_team(
                         t, wpx, L_, live_scores(lg.name, wk_all).get(t.team_id),
                         PROGH, week=wk_all, allowed=allowed_now(wk_all))
@@ -1686,6 +1689,9 @@ with t_match:
     blob = get_blob()
     by_key = {key(r["name"], r["position"]): r for r in rows}
     tms = rosters_mod.all_teams(L, wkm, blob)
+    if rosters_mod.has_drafted(L, tms):
+        # Eliminated managers keep an empty row; they are not the field.
+        tms = rosters_mod.active_teams(tms)
     if not rosters_mod.has_drafted(L, tms):
         st.info("Not drafted yet.")
     else:
@@ -2000,7 +2006,8 @@ with t_waiver:
                     if _adds[r["name"]] <= 0:
                         continue
                     _bids[r["name"]] = _faab0.guillotine_value(
-                        all_t, by_key, L, byes_all(), _wsc0, r,
+                        rosters_mod.active_teams(all_t), by_key, L,
+                        byes_all(), _wsc0, r,
                         _bud0, _wl0, sims=1500)["max"]
             except Exception as _e:
                 st.caption(f"couldn't price the wire: {type(_e).__name__}")
@@ -2066,8 +2073,8 @@ with t_waiver:
                     if row is None:
                         continue
                     v = faab_mod.guillotine_value(
-                        all_t, by_key, L, byes_all(), _wsc, row, bud, wl,
-                        sims=1500)
+                        rosters_mod.active_teams(all_t), by_key, L, byes_all(),
+                        _wsc, row, bud, wl, sims=1500)
                     priced.append({"Player": v["player"], "Pos": row["pos_rank"],
                                    "+weeks alive": v["extra_weeks"],
                                    "Fair bid": f"${v['fair']}",
