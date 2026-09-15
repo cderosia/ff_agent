@@ -1918,17 +1918,49 @@ with t_waiver:
                  and r.get("pos_rank_n") is not None]
         _free.sort(key=lambda r: -r["points"])
         _base = draft_mod.lineup_value(mine, L, L.replacement)
-        st.dataframe(pd.DataFrame([{
+        _top = _free[:20]
+        _adds = {r["name"]: draft_mod.lineup_value(mine + [r], L, L.replacement)
+                 - _base for r in _top}
+
+        # What he is worth in a guillotine league, priced in weeks of survival.
+        # Only for a player who actually improves the lineup: the model gives
+        # everyone else zero extra weeks by construction, so pricing them is
+        # both pointless and the honest answer.
+        _bids = {}
+        _is_gl = bool(L.raw.get("guillotine")) and L.waiver_style == "faab"
+        if _is_gl and any(v > 0 for v in _adds.values()):
+            try:
+                from bakeoff import weekly_score as _wsc0
+                from ff import faab as _faab0
+                _bud0 = faab_balance(L.name) or 0
+                _wl0 = max(1, regular_weeks(L.name) - week + 1)
+                for r in _top:
+                    if _adds[r["name"]] <= 0:
+                        continue
+                    _bids[r["name"]] = _faab0.guillotine_value(
+                        all_t, by_key, L, byes_all(), _wsc0, r,
+                        _bud0, _wl0, sims=1500)["max"]
+            except Exception as _e:
+                st.caption(f"couldn't price the wire: {type(_e).__name__}")
+
+        _cols = [{
             "Player": r["name"], "Pos": r["pos_rank"],
             "Team": r.get("team") or "",
             "Season": round(r["points"]),
             "VORP": round(r["vorp"]),
-            "Adds now": round(draft_mod.lineup_value(mine + [r], L, L.replacement)
-                              - _base, 1),
-        } for r in _free[:20]]), hide_index=True, width="stretch")
+            "Adds now": round(_adds[r["name"]], 1),
+            **({"Max bid": f"${_bids.get(r['name'], 0)}"} if _is_gl else {}),
+        } for r in _top]
+        st.dataframe(pd.DataFrame(_cols), hide_index=True, width="stretch")
         st.caption("**Adds now** is what he'd add to THIS week's starting "
                    "lineup; **Season** and **VORP** are why he's worth a roster "
-                   "spot even when that is zero.")
+                   "spot even when that is zero."
+                   + ("  **Max bid** is the most he is worth to you: your budget "
+                      "scaled by the extra weeks alive he buys, plus a premium "
+                      "for how many rivals need the same slot. $0 means he adds "
+                      "nothing to your starting lineup, which buys zero weeks — "
+                      "that is a real answer, not a missing one." if _is_gl
+                      else ""))
 
         st.subheader("Usage risers — opportunity moves before production")
         movers = sorted([c for c in cands], key=lambda c: -float(c["ΔSnap"]))[:12]
