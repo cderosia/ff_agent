@@ -1262,14 +1262,21 @@ if nav == "Sunday":
 HAS_KEEPERS = bool((cfg.get("keepers") or {}).get("max"))
 # Lineup leads: on any given day the question is "is my lineup right", not
 # "summarise my week".
+# Same principle as Keepers: a house rule only one league plays, so it is read
+# from that league's config rather than hardcoded by name. Set `donuts: true`
+# on any other league that adopts it.
+HAS_DONUTS = bool(cfg.get("donuts"))
 _names = ["Lineup", "Report", "Matchups", "Waivers", "Trades"]
 if HAS_KEEPERS:
     _names.append("Keepers")
+if HAS_DONUTS:
+    _names.append("Donuts")
 _T = dict(zip(_names, st.tabs(_names)))
 
 
 t_report, t_lineup, t_match = _T.get("Report"), _T.get("Lineup"), _T.get("Matchups")
 t_waiver, t_trade, t_keep = _T.get("Waivers"), _T.get("Trades"), _T.get("Keepers")
+t_donut = _T.get("Donuts")
 
 
 # ---------------------------------------------------------------------------
@@ -2127,3 +2134,89 @@ if t_keep is not None:          # league has no keepers -> no tab
                 st.caption("**Keeps at** is the round it costs you next year. "
                            "**Surplus** is his value minus what you'd expect from "
                            "that pick — positive means keeping beats drafting.")
+
+
+# ---------------------------------------------------------------------------
+# Donuts. A house rule in 719: a STARTER who finishes his game on 0.0 or fewer
+# points pays a penalty. Enabled per league by `donuts: true` in leagues.yaml.
+if t_donut is not None:
+    with t_donut:
+        st.markdown(th.css(scope="dn"), unsafe_allow_html=True)
+        st.subheader("Donut tracker")
+        wkd = int(st.slider("Week", 1, 18, _default_week(), key="dn_wk"))
+        try:
+            tms_d = rosters_mod.all_teams(L, wkd, blob)
+            lv_d = live_scores(L.name, wkd)
+            KS_d = kickoff_states(wkd)
+            PER_d = ls_mod.game_period(_games(wkd))
+        except Exception as e:
+            st.error(f"couldn't read the league: {type(e).__name__}: {e}")
+            tms_d, lv_d, KS_d, PER_d = [], {}, {}, {}
+
+        # STARTERS only. A bench player scores nothing for anyone by definition,
+        # so counting him would hand every team a dozen donuts a week and make
+        # the list meaningless. If the house rule really does cover the whole
+        # roster, this is the line to change.
+        served, watch = [], []
+        for t in tms_d:
+            row = (lv_d.get(t.team_id) or {})
+            got = row.get("starters") or {}
+            for q in (t.starters or []):
+                if not q.get("name"):
+                    continue
+                pos = (q.get("position") or "").upper()
+                pos = "DST" if pos in ("DEF", "D/ST") else pos
+                pts = got.get(key(q["name"], pos))
+                if pts is None:
+                    continue
+                pts = float(pts)
+                if pts > 0:
+                    continue
+                st_, _per = ls_mod.pick(q.get("team"), PER_d, ("pre", 0))
+                rec = {"team": t.name, "mine": bool(t.mine), "name": q["name"],
+                       "pos": pos, "slot": q.get("slot"), "nfl": q.get("team"),
+                       "pts": pts}
+                if st_ == "post":
+                    served.append(rec)
+                elif ls_mod.second_half(q.get("team"), PER_d):
+                    watch.append(rec)
+
+        def _dn_table(rows, empty):
+            if not rows:
+                st.markdown(f'<div class="dn"><div class="ffok">{empty}</div>'
+                            '</div>', unsafe_allow_html=True)
+                return
+            trs, last = [], None
+            for r in sorted(rows, key=lambda x: (not x["mine"], x["team"],
+                                                 x["pts"], x["name"])):
+                cell = "" if r["team"] == last else (
+                    f'<b class="{"good" if r["mine"] else ""}">{r["team"]}</b>'
+                    + (" ← you" if r["mine"] else ""))
+                last = r["team"]
+                trs.append(
+                    f'<tr style="background:rgba(248,113,113,.07)">'
+                    f'<td>{cell}</td>'
+                    f'<td><b>{r["name"]}</b>'
+                    f'{dot_if_live(r["nfl"], KS_d)}</td>'
+                    f'<td class="ffslot">{r["slot"] or r["pos"]}</td>'
+                    f'<td class="ffslot">{r["nfl"]}</td>'
+                    f'<td class="ffnum bad">{r["pts"]:.1f}</td></tr>')
+            st.markdown(
+                '<div class="dn"><div class="ffwrap"><table class="fftable">'
+                '<tr><th>Team</th><th>Player</th><th>Slot</th><th>Tm</th>'
+                '<th class="ffnum">Points</th></tr>'
+                + "".join(trs) + '</table></div></div>', unsafe_allow_html=True)
+
+        st.markdown(f"#### Served  ·  {len(served)}")
+        _dn_table(served, "No donuts yet. Every starter whose game has "
+                          "finished is on the board.")
+        st.caption("Starters whose game is **final** on 0.0 or fewer. These are "
+                   "settled — nothing can move them.")
+
+        st.markdown("")
+        st.markdown(f"#### On watch  ·  {len(watch)}")
+        _dn_table(watch, "Nobody in the second half is sitting on a donut.")
+        st.caption("Starters **past halftime** still on 0.0 or fewer. Not "
+                   "settled: a catch in the 4th wipes it. Players whose game "
+                   "has not reached the 3rd quarter are excluded — it is too "
+                   "early to mean anything.")
