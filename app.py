@@ -1840,8 +1840,16 @@ with t_match:
 # ---- Waivers --------------------------------------------------------------
 with t_waiver:
     st.header("Waivers")
-    st.caption(f"**{L.waiver_note}.** No FAAB in any of your leagues — the cost of a "
-               "claim is your waiver position, so the call is claim, wait, or skip.")
+    # Was hardcoded to "No FAAB in any of your leagues", which stopped being
+    # true the moment work was wired up -- and it sat directly above a panel
+    # reading "FAAB LEFT $1000". Read the league's own style instead.
+    st.caption(f"**{L.waiver_note}.** " + (
+        "Claims cost money, not waiver position: bid on as many players as you "
+        "like and each is settled on its own, so the call is how much, not "
+        "whether."
+        if L.waiver_style == "faab" else
+        "No FAAB here — the cost of a claim is your waiver position, so the "
+        "call is claim, wait, or skip."))
 
     if False:   # cross-platform now; kept as a switch if a platform regresses
         st.info("Waiver analysis needs rosters this platform isn't returning. "
