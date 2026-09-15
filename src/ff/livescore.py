@@ -120,18 +120,10 @@ def _espn(league, week, blob):
     return out
 
 
-def _yahoo_players(league, team_key: str, week: int) -> tuple[dict, dict]:
-    """(all players, starters only) -> points, for one Yahoo team.
-
-    The league scoreboard gives a team total but no breakdown, which left every
-    Yahoo player showing 0 scored. `roster/players/stats` carries per-player
-    `player_points` and the slot each was started in.
-    """
-    from . import yahoo
+def _yahoo_roster_node(node) -> tuple[dict, dict]:
+    """Parse one team's `players` node into (all players, starters) -> points."""
     players, started = {}, {}
-    d = yahoo.get(f"/team/{team_key}/roster/players/stats;type=week;week={week}")
-    node = d["fantasy_content"]["team"][1]["roster"]["0"]["players"]
-    for k, v in node.items():
+    for k, v in (node or {}).items():
         if k == "count":
             continue
         pl = v["player"]
@@ -160,9 +152,48 @@ def _yahoo_players(league, team_key: str, week: int) -> tuple[dict, dict]:
     return players, started
 
 
+def _yahoo_all_rosters(league, week: int) -> dict:
+    """{team_id: (players, starters)} for EVERY team, in one request.
+
+    Was one HTTP call per team. At 16 teams that was ~11 seconds of the app's
+    cold start -- more than every other league combined -- for data Yahoo will
+    serve in a single round trip at `/league/{key}/teams/roster/players/stats`.
+    Measured: 16 sequential calls 10.9s, one batched call 0.6s.
+    """
+    from . import yahoo
+    lk = league.raw.get("league_key")
+    out = {}
+    try:
+        d = yahoo.get(f"/league/{lk}/teams/roster/players/stats"
+                      f";type=week;week={week}")
+        node = d["fantasy_content"]["league"][1]["teams"]
+    except Exception:
+        return out
+    for k, v in (node or {}).items():
+        if k == "count":
+            continue
+        try:
+            parts = v["team"]
+            info = {}
+            for bit in parts[0]:
+                if isinstance(bit, dict):
+                    info.update(bit)
+            tid = str(info.get("team_id"))
+            roster = None
+            for bit in parts[1:]:
+                if isinstance(bit, dict) and "roster" in bit:
+                    roster = bit["roster"]["0"]["players"]
+            if tid and roster is not None:
+                out[tid] = _yahoo_roster_node(roster)
+        except Exception:
+            continue          # one unreadable team must not lose the other 15
+    return out
+
+
 def _yahoo(league, week, blob):
     from . import yahoo
     lk = league.raw.get("league_key")
+    rosters_by_team = _yahoo_all_rosters(league, week)
     d = yahoo.get(f"/league/{lk}/scoreboard;week={week}")
     out = {}
     try:
@@ -185,12 +216,9 @@ def _yahoo(league, week, blob):
                 if isinstance(bit, dict) and "team_points" in bit:
                     pts = float(bit["team_points"].get("total") or 0)
             tid = str(info.get("team_id"))
-            players = started = {}
-            try:
-                players, started = _yahoo_players(
-                    league, info.get("team_key") or f"{lk}.t.{tid}", week)
-            except Exception:
-                pass          # totals still work; only the breakdown is lost
+            # Already fetched for every team above; the totals still work
+            # if a breakdown is missing.
+            players, started = rosters_by_team.get(tid, ({}, {}))
             out[tid] = {"total": pts, "players": players, "starters": started}
     return out
 
@@ -348,3 +376,27 @@ def is_playing(team: str | None, states: dict) -> bool:
         if c in states:
             return states[c] == "in"
     return False
+
+
+def game_period(games_list: list[dict]) -> dict:
+    """{TEAM: (state, period)} -- the quarter, not just whether it is live.
+
+    `game_progress` gives a fraction, which is the right thing for projecting
+    but the wrong thing for "is he in the second half": a fraction blurs the
+    half boundary, and a rule about halves should read the quarter directly.
+    """
+    out = {}
+    for g in (games_list or []):
+        st = g.get("state") or "pre"
+        per = int(g.get("period") or 0)
+        for side in ("home", "away"):
+            t = g.get(side)
+            if t:
+                out[str(t).upper()] = (st, per)
+    return out
+
+
+def second_half(team: str | None, periods: dict) -> bool:
+    """His game is live and past halftime (3rd quarter or later)."""
+    st, per = pick(team, periods, ("pre", 0))
+    return st == "in" and per >= 3
