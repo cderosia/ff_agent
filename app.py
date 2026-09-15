@@ -620,27 +620,42 @@ def build_report(league_name: str, week: int, bust: int = 0):
         trend["ppg"] = trend.k.map(ppg).fillna(0.0)
         heat = weekly_mod.heat_rank(blob) if live else {}
         base = draft_mod.lineup_value(mine, L_, L_.replacement)
+        # RISERS come from the usage frame -- a riser needs a baseline to have
+        # risen from. CLAIMS come from the board, so a player absent from the
+        # usage data (a rookie, or anyone when this falls back to last season)
+        # can still be recommended. Keeping claims on the usage frame hid
+        # Jadarian Price, worth +32 to the starting lineup, from the Report tab
+        # and the Waivers tab at the same time.
+        tmap = {r.k: r for r in trend.itertuples()}
         for r in trend.itertuples():
             if r.k in taken or r.snap_pct_recent <= 0.25:
                 continue
             row = by_key.get(r.k)
             if row is None:
                 continue
-            gain = draft_mod.lineup_value(mine + [row], L_, L_.replacement) - base
             risers.append({"Player": row["name"], "Pos": row["pos_rank"],
                            "PPG": round(r.ppg, 1),
                            "Snap%": f"{r.snap_pct_recent*100:.0f}%",
                            "ΔSnap": f"{r.snap_delta*100:+.0f}",
                            "Tgt": round(r.targets_recent, 1),
                            "_d": r.snap_delta})
+        for row in rows_:
+            k_ = key(row["name"], row["position"])
+            if k_ in taken or row.get("pos_rank_n") is None:
+                continue
+            gain = draft_mod.lineup_value(mine + [row], L_, L_.replacement) - base
             if gain <= 0:
                 continue
-            call, why = weekly_mod.claim_call(gain, heat.get(r.k),
+            t_ = tmap.get(k_)
+            call, why = weekly_mod.claim_call(gain, heat.get(k_),
                                               L_.waiver_style, live)
             cands.append({"Player": row["name"], "Pos": row["pos_rank"],
-                          "Adds": round(gain), "PPG": round(r.ppg, 1),
-                          "Snap%": f"{r.snap_pct_recent*100:.0f}%",
-                          "ΔSnap": f"{r.snap_delta*100:+.0f}",
+                          "Adds": round(gain),
+                          "PPG": round(t_.ppg, 1) if t_ is not None else 0.0,
+                          "Snap%": (f"{t_.snap_pct_recent*100:.0f}%"
+                                    if t_ is not None else "—"),
+                          "ΔSnap": (f"{t_.snap_delta*100:+.0f}"
+                                    if t_ is not None else "—"),
                           "Call": call, "Why": why, "_g": gain})
         cands.sort(key=lambda c: -c["_g"])
         risers.sort(key=lambda c: -c["_d"])
@@ -1887,23 +1902,46 @@ with t_waiver:
 
             heat = {} if replay else weekly_mod.heat_rank(blob)
             base = draft_mod.lineup_value(mine, L, L.replacement)
+
+            # Candidates come from the BOARD -- every free agent -- and usage is
+            # joined on where it exists. This used to iterate the usage frame
+            # instead, which meant a player with no history could not appear
+            # however much he would add: a rookie is absent from last season's
+            # data entirely, and the tab falls back to last season whenever this
+            # one has no games through week-1 yet. Jadarian Price would have
+            # added 32.4 to the starting lineup and was invisible here while
+            # sitting near the top of Best available two sections below.
+            #
+            # Scoring all 385 free agents costs 0.01s, so the filter was never
+            # buying speed either.
+            tmap = {r.k: r for r in trend.itertuples()}
             cands = []
-            for r in trend.itertuples():
-                if r.k in taken or r.snap_pct_recent <= 0.25:
+            for row in rows:
+                k_ = key(row["name"], row["position"])
+                if k_ in taken or row.get("pos_rank_n") is None:
                     continue
-                row = by_key.get(r.k)
-                if row is None:
-                    continue
+                tr_ = tmap.get(k_)
                 gain = draft_mod.lineup_value(mine + [row], L, L.replacement) - base
-                call, why = weekly_mod.claim_call(gain, heat.get(r.k),
+                # The snap gate stays, but only as a NOISE filter on players who
+                # add nothing. It must never hide someone who improves the
+                # lineup, which is the one question this section answers.
+                if gain <= 0 and (tr_ is None or tr_.snap_pct_recent <= 0.25):
+                    continue
+                call, why = weekly_mod.claim_call(gain, heat.get(k_),
                                                   L.waiver_style, not replay)
                 cands.append({"Player": row["name"], "Pos": row["pos_rank"],
-                              "Adds": round(gain), "PPG": round(r.ppg, 1),
-                              "Snap%": f"{r.snap_pct_recent*100:.0f}%",
-                              "ΔSnap": f"{r.snap_delta*100:+.0f}",
-                              "Tgt": round(r.targets_recent, 1),
-                              "ΔTgt": f"{r.tgt_delta:+.1f}",
-                              "Call": call, "Why": why, "_g": gain})
+                              "Adds": round(gain),
+                              "PPG": round(tr_.ppg, 1) if tr_ is not None else 0.0,
+                              "Snap%": (f"{tr_.snap_pct_recent*100:.0f}%"
+                                        if tr_ is not None else "—"),
+                              "ΔSnap": (f"{tr_.snap_delta*100:+.0f}"
+                                        if tr_ is not None else "—"),
+                              "Tgt": (round(tr_.targets_recent, 1)
+                                      if tr_ is not None else 0.0),
+                              "ΔTgt": (f"{tr_.tgt_delta:+.1f}"
+                                       if tr_ is not None else "—"),
+                              "Call": call, "Why": why, "_g": gain,
+                              "_ds": (tr_.snap_delta if tr_ is not None else None)})
 
         useful = sorted([c for c in cands if c["_g"] > 0], key=lambda c: -c["_g"])
         st.subheader("Improves your starting lineup")
@@ -1914,8 +1952,9 @@ with t_waiver:
                     "available are listed below anyway: they are who you'd take "
                     "if an injury opened a slot.")
         else:
-            st.dataframe(pd.DataFrame(useful).drop(columns=["_g"]),
-                         hide_index=True, width='stretch')
+            st.dataframe(
+                pd.DataFrame(useful).drop(columns=["_g", "_ds"], errors="ignore"),
+                hide_index=True, width='stretch')
 
         # Best available regardless of whether they crack the lineup. Ranked by
         # season value, because that is what makes someone worth a bench spot
@@ -1971,7 +2010,10 @@ with t_waiver:
                       else ""))
 
         st.subheader("Usage risers — opportunity moves before production")
-        movers = sorted([c for c in cands], key=lambda c: -float(c["ΔSnap"]))[:12]
+        # Only players with real usage data -- a "riser" needs a baseline to
+        # have risen from.
+        movers = sorted([c for c in cands if c.get("_ds") is not None],
+                        key=lambda c: -c["_ds"])[:12]
         st.dataframe(pd.DataFrame(movers)[
             ["Player", "Pos", "Snap%", "ΔSnap", "Tgt", "ΔTgt", "PPG"]],
             hide_index=True, width='stretch')
