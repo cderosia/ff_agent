@@ -868,6 +868,14 @@ def _flags(rep, name, week: int | None = None) -> tuple[list[dict], int]:
             locked += 1
             continue
         bad = sw["out_status"] in ("out", "unknown")
+        # A swap worth +0.0 is not a job. Two players separated by less than a
+        # tenth of a point are the same player as far as this model can tell,
+        # and putting that on a to-do list is how a to-do list gets ignored.
+        # Still shown on the Lineup page, where the column is a description of
+        # the lineup rather than a demand -- and `close_calls` names them
+        # explicitly under "Too close to call".
+        if not bad and abs(sw.get("gain") or 0) < 0.1:
+            continue
         # One line, not two: the reason he has to come out and the instruction
         # for who replaces him are the same decision.
         why = ""
@@ -894,6 +902,21 @@ def _flags(rep, name, week: int | None = None) -> tuple[list[dict], int]:
 # Was two tabs, "Sunday" and "Watch", asking one question: what is on and who
 # of mine is in it. Merged.
 # ---- Lineup ---------------------------------------------------------------
+
+
+def status_pill(stt: str) -> str:
+    """Availability badge. Empty for a healthy player.
+
+    "unknown" means `availability()` found no projection for the week -- not
+    that anyone has been ruled out -- so it gets its own amber label. It used
+    to render in the OUT colour, which said a player was ruled out on the
+    strength of a missing number.
+    """
+    if not stt or stt == "ok":
+        return ""
+    label = {"unknown": "no proj"}.get(stt, stt)
+    return (f'<span class="pill {"out" if stt == "out" else "risk"}">'
+            f'{label}</span>')
 
 
 def stake_rows(week: int) -> dict:
@@ -1382,9 +1405,7 @@ with t_report:
         trows = []
         for a in d.get("actual", []):
             stt = (a.get("status") or "ok")
-            pill = ("" if stt == "ok" else
-                    f'<span class="pill {"out" if stt in ("out", "unknown") else "risk"}">'
-                    f'{stt}</span>')
+            pill = status_pill(stt)
             note = f'<span class="dim"> {a.get("why", "")}</span>' if a.get("why") else ""
             pcls = "bad" if (a.get("week_points") or 0) <= 0 else ""
             trows.append(
@@ -1625,10 +1646,7 @@ with t_lineup:
         brows = []
         for q in sorted(bench, key=lambda x: -(x.get("week_points") or 0)):
             stt = q.get("status") or "ok"
-            pill = ("" if stt == "ok" else
-                    f'<span class="pill '
-                    f'{"out" if stt in ("out", "unknown") else "risk"}">'
-                    f'{stt}</span>')
+            pill = status_pill(stt)
             cells = ""
             if LIVE:
                 if not ls_mod.has_played(q.get("team"), KSTATE):
