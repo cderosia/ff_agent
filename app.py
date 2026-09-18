@@ -904,6 +904,53 @@ def _flags(rep, name, week: int | None = None) -> tuple[list[dict], int]:
 # ---- Lineup ---------------------------------------------------------------
 
 
+# How many of a position is worth holding. Carter's rule: one spare QB, one
+# spare TE, one spare K, one spare D/ST -- running backs and receivers are
+# uncapped, because those are the slots that churn and the ones a FLEX eats.
+#
+# Expressed as dedicated STARTING slots + that allowance, so it follows each
+# league's own shape: 719 starts two quarterbacks and is therefore full at
+# three, while work starts one and currently rosters exactly one.
+BENCH_ALLOWANCE = {"QB": 1, "TE": 1, "K": 1, "DST": 1}
+
+
+def _norm_pos(p: str | None) -> str:
+    p = (p or "").upper()
+    return "DST" if p in ("DEF", "D/ST") else p
+
+
+def dedicated_slots(pos: str, league) -> int:
+    """Starting slots only this position can fill. A FLEX counts for nobody."""
+    return sum(n for slot, n in (league.starters or {}).items()
+               if draft_mod.SLOT_ELIGIBILITY.get(slot, {slot}) == {pos})
+
+
+def roster_caps(league) -> dict:
+    """{pos: most worth holding}. Absent = uncapped."""
+    return {pos: dedicated_slots(pos, league) + allow
+            for pos, allow in BENCH_ALLOWANCE.items()}
+
+
+def safe_to_drop(rows, league):
+    """Bench rows that can be cut without going short of a required starter.
+
+    Separate from the cap and not a preference: a cap says what is worth
+    HOLDING, this says what you cannot go below. Dropping your only
+    quarterback to add a fourth receiver is legal in the model and absurd in
+    the league.
+    """
+    have = {}
+    for r in rows:
+        have[_norm_pos(r.get("position"))] = have.get(
+            _norm_pos(r.get("position")), 0) + 1
+    out = []
+    for r in rows:
+        pos = _norm_pos(r.get("position"))
+        if have.get(pos, 0) - 1 >= dedicated_slots(pos, league):
+            out.append(r)
+    return out
+
+
 def status_pill(stt: str) -> str:
     """Availability badge. Empty for a healthy player.
 
@@ -2064,12 +2111,30 @@ with t_waiver:
         _start_nm = {q["name"] for q in ((_me_t.starters if _me_t else []) or [])
                      if q.get("name")}
         _bench_rows = [r for r in mine if r["name"] not in _start_nm]
-        if _bench_rows and _free:
-            _worst = min(_bench_rows, key=lambda r: r["vorp"])
-            _ups = sorted(((r["vorp"] - _worst["vorp"], r) for r in _free
+        # Only positions you have room for, and only drops that leave you able
+        # to field a legal lineup. Without the first it offered 719 a FOURTH
+        # quarterback; without the second it would happily cut work's only one.
+        _caps = roster_caps(L)
+        _have = {}
+        for r in mine:
+            _pp = _norm_pos(r.get("position"))
+            _have[_pp] = _have.get(_pp, 0) + 1
+        _full = sorted(p for p, c in _caps.items() if _have.get(p, 0) >= c)
+        _droppable = safe_to_drop(_bench_rows, L)
+        _room = [r for r in _free
+                 if _have.get(_norm_pos(r.get("position")), 0)
+                 < _caps.get(_norm_pos(r.get("position")), 99)]
+        if _droppable and _room:
+            _worst = min(_droppable, key=lambda r: r["vorp"])
+            _ups = sorted(((r["vorp"] - _worst["vorp"], r) for r in _room
                            if r["vorp"] > _worst["vorp"]),
                           key=lambda x: -x[0])[:10]
             st.subheader(f"Bench upgrades ({len(_ups)})")
+            if _full:
+                st.caption("Not shown: **" + ", ".join(_full) + "** — you "
+                           "already carry as many as you can use "
+                           + ", ".join(f"{p} {_have.get(p,0)}/{_caps[p]}"
+                                       for p in _full) + ".")
             if not _ups:
                 st.markdown('<div class="wv"><div class="ffok">Nothing on the '
                             'wire is worth more than the last man on your '
@@ -2085,12 +2150,13 @@ with t_waiver:
                 } for g, r in _ups]), hide_index=True, width="stretch")
             st.caption(
                 f"Measured against **{_worst['name']}** ({_worst['pos_rank']}, "
-                f"VORP {_worst['vorp']:.0f}) — the lowest-value man on your "
-                "bench, and so the one you would actually cut. **+VORP** is "
+                f"VORP {_worst['vorp']:.0f}) — the lowest-value man you can cut "
+                "without going short at a position you must start. **+VORP** is "
                 "season value gained by making that swap. These do NOT improve "
                 "this week's starting lineup — nothing on the bench can — they "
                 "improve what you are holding for the weeks when a starter is "
-                "hurt, on bye, or busts. Starters are never offered as the drop.")
+                "hurt, on bye, or busts. Capped at one spare QB, TE, K and "
+                "D/ST; RB and WR are uncapped.")
 
         st.subheader("Usage risers — opportunity moves before production")
         # Only players with real usage data -- a "riser" needs a baseline to
