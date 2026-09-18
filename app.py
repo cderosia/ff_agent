@@ -2049,6 +2049,49 @@ with t_waiver:
                       "that is a real answer, not a missing one." if _is_gl
                       else ""))
 
+        # --- bench upgrades ---------------------------------------------
+        # Every other section on this page is keyed to the STARTING lineup, and
+        # once your starters are full a bench player adds exactly 0.0 to it by
+        # definition (see CLAUDE.md on the round-7 flatline). So "Adds now"
+        # cannot tell a TE11 on the wire from a practice-squad body, and a
+        # straight upgrade to the back of your roster was invisible: 719 had
+        # Mark Andrews available against a rostered RB35 and reported +0.0.
+        #
+        # VORP is the right currency for a bench seat -- it already prices each
+        # position against its own replacement level, so comparing a tight end
+        # to a running back through it is exactly what it is for.
+        _me_t = next((t for t in all_t if t.mine), None)
+        _start_nm = {q["name"] for q in ((_me_t.starters if _me_t else []) or [])
+                     if q.get("name")}
+        _bench_rows = [r for r in mine if r["name"] not in _start_nm]
+        if _bench_rows and _free:
+            _worst = min(_bench_rows, key=lambda r: r["vorp"])
+            _ups = sorted(((r["vorp"] - _worst["vorp"], r) for r in _free
+                           if r["vorp"] > _worst["vorp"]),
+                          key=lambda x: -x[0])[:10]
+            st.subheader(f"Bench upgrades ({len(_ups)})")
+            if not _ups:
+                st.markdown('<div class="wv"><div class="ffok">Nothing on the '
+                            'wire is worth more than the last man on your '
+                            'bench.</div></div>', unsafe_allow_html=True)
+            else:
+                st.dataframe(pd.DataFrame([{
+                    "Player": r["name"], "Pos": r["pos_rank"],
+                    "Team": r.get("team") or "",
+                    "Season": round(r["points"]),
+                    "VORP": round(r["vorp"]),
+                    "Drop": _worst["name"],
+                    "+VORP": round(g),
+                } for g, r in _ups]), hide_index=True, width="stretch")
+            st.caption(
+                f"Measured against **{_worst['name']}** ({_worst['pos_rank']}, "
+                f"VORP {_worst['vorp']:.0f}) — the lowest-value man on your "
+                "bench, and so the one you would actually cut. **+VORP** is "
+                "season value gained by making that swap. These do NOT improve "
+                "this week's starting lineup — nothing on the bench can — they "
+                "improve what you are holding for the weeks when a starter is "
+                "hurt, on bye, or busts. Starters are never offered as the drop.")
+
         st.subheader("Usage risers — opportunity moves before production")
         # Only players with real usage data -- a "riser" needs a baseline to
         # have risen from.
