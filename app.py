@@ -931,20 +931,26 @@ def roster_caps(league) -> dict:
             for pos, allow in BENCH_ALLOWANCE.items()}
 
 
-def safe_to_drop(rows, league):
+def safe_to_drop(bench_rows, all_rows, league):
     """Bench rows that can be cut without going short of a required starter.
 
     Separate from the cap and not a preference: a cap says what is worth
     HOLDING, this says what you cannot go below. Dropping your only
     quarterback to add a fourth receiver is legal in the model and absurd in
     the league.
+
+    Counts come from the WHOLE roster and the choice from the bench. Counting
+    the bench alone asks "does my bench still cover my starting slots", which
+    is a different and much harsher question: friends carries two running backs
+    on the bench against two RB slots, so every one of them looked
+    undroppable and the section disappeared entirely.
     """
     have = {}
-    for r in rows:
-        have[_norm_pos(r.get("position"))] = have.get(
-            _norm_pos(r.get("position")), 0) + 1
+    for r in all_rows:
+        pos = _norm_pos(r.get("position"))
+        have[pos] = have.get(pos, 0) + 1
     out = []
-    for r in rows:
+    for r in bench_rows:
         pos = _norm_pos(r.get("position"))
         if have.get(pos, 0) - 1 >= dedicated_slots(pos, league):
             out.append(r)
@@ -2120,7 +2126,7 @@ with t_waiver:
             _pp = _norm_pos(r.get("position"))
             _have[_pp] = _have.get(_pp, 0) + 1
         _full = sorted(p for p, c in _caps.items() if _have.get(p, 0) >= c)
-        _droppable = safe_to_drop(_bench_rows, L)
+        _droppable = safe_to_drop(_bench_rows, mine, L)
         _room = [r for r in _free
                  if _have.get(_norm_pos(r.get("position")), 0)
                  < _caps.get(_norm_pos(r.get("position")), 99)]
