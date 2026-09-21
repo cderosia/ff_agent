@@ -25,6 +25,12 @@ ALIASES = {
     "hollywood brown": "marquise brown",
     "scotty miller": "scott miller",
     "nick westbrook ikhine": "nick westbrook",
+    # Found by scanning the three projection feeds for two keys that share a
+    # surname, position and pro team. An unmatched spelling does not just miss a
+    # join here -- it becomes a SECOND player on the board, who is then never in
+    # the rostered set and shows up on every league's free-agent list.
+    "kenny gainwell": "kenneth gainwell",
+    "matt hibner": "matthew hibner",
 }
 
 

@@ -727,9 +727,14 @@ def side_by_side(league, a_team, b_team, week, live, prog, states,
     """Two lineups laid out the way a fantasy matchup is normally read.
 
     Names sit on the outer edges and the numbers meet in the middle around the
-    slot, so the two teams mirror each other:
+    slot, so the two teams are a true mirror image of each other -- each side
+    reads outward from the slot in the same order, Proj then Cur:
 
-        Jalen Hurts   12.3  18.2 | QB |  9.1  20.4   Dak Prescott
+        Jalen Hurts   18.2  12.3 | QB |  9.1  20.4   Dak Prescott
+
+    The left side used to run Cur then Proj, which put Proj against Cur across
+    the slot and made the two columns nearest the middle mean different things
+    on either side of it.
 
     Per-player numbers come from `lineup.build_pool` -- the SAME function the
     Lineup tab uses -- rather than being recomputed here. The old version read
@@ -788,8 +793,8 @@ def side_by_side(league, a_team, b_team, week, live, prog, states,
                     f'<td class="ffright">{dot}{z["name"]}</td>')
         dot = LIVEDOT if z["playing"] else ""
         return (f'<td>{z["name"]}{dot}</td>'
-                f'<td class="ffnum">{cur}</td>'
-                f'<td class="ffnum dim">{prj}</td>')
+                f'<td class="ffnum dim">{prj}</td>'
+                f'<td class="ffnum">{cur}</td>')
 
     rows = []
     for x, y in zip(A + [None] * max(0, len(B) - len(A)),
@@ -809,14 +814,14 @@ def side_by_side(league, a_team, b_team, week, live, prog, states,
 
     return (f'<div class="{scope}"><div class="ffwrap"><table class="fftable">'
             f'<tr><th class="{"good" if a_mine else ""}">{a_team.name}</th>'
-            '<th class="ffnum">Cur</th><th class="ffnum">Proj</th><th></th>'
+            '<th class="ffnum">Proj</th><th class="ffnum">Cur</th><th></th>'
             '<th class="ffnuml">Cur</th><th class="ffnuml">Proj</th>'
             f'<th class="ffright {"good" if b_mine else ""}">{b_team.name}</th>'
             '</tr>'
             + "".join(rows)
-            # 7 columns: name | cur | proj | slot | cur | proj | name
-            + f'<tr><td></td><td class="ffnum"><b>{ca}</b></td>'
-              f'<td class="ffnum"><b>{pa}</b></td>'
+            # 7 columns: name | proj | cur | slot | cur | proj | name
+            + f'<tr><td></td><td class="ffnum"><b>{pa}</b></td>'
+              f'<td class="ffnum"><b>{ca}</b></td>'
               f'<td class="ffslot" style="text-align:center">TOTAL</td>'
               f'<td class="ffnuml"><b>{cb}</b></td>'
               f'<td class="ffnuml"><b>{pb}</b></td><td></td></tr>'
@@ -957,6 +962,28 @@ def safe_to_drop(bench_rows, all_rows, league):
     return out
 
 
+def pos_rank_label(p: dict, slot: str | None = None) -> str:
+    """"QB (1)" -- his position, and where he ranks inside it on this board.
+
+    The rank is what makes it worth reading: "RB" in your FLEX says nothing,
+    "RB (8)" and "RB (41)" are different weeks. Falls back to the bare position
+    for kickers and defenses, which ff.vbd keeps off the board and so have no
+    rank to show -- never an invented one.
+
+    `slot` is prefixed only where it is NOT simply the position, which in
+    practice means the flex slots. Slot and position were briefly two columns
+    and for ten rows in twelve they printed the same word twice; collapsing
+    them loses nothing except on the rows where the slot is the whole point.
+    """
+    pos = (p.get("position") or "").upper()
+    n = p.get("pos_rank_n")
+    label = f"{pos} ({n})" if n else (p.get("pos_rank") or pos)
+    sl = (slot or "").upper()
+    if sl and sl != pos:
+        return f'<span class="dim">{sl}</span> {label}'
+    return label
+
+
 def status_pill(stt: str) -> str:
     """Availability badge. Empty for a healthy player.
 
@@ -1010,6 +1037,33 @@ def stake_rows(week: int) -> dict:
                          "playing": ls_mod.is_playing(h["nfl_team"], KST)})
         if keep:
             out[tm] = keep
+    return out
+
+
+def league_filter(widget_key: str, label: str = "Leagues") -> set:
+    """Which leagues a cross-league page is showing. Defaults to all of them.
+
+    Home and Sunday are deliberately cross-league -- your Sunday is not
+    organised by league -- but that is exactly why they need a filter: with
+    five leagues running, one game can put eight rows on the page and only two
+    of them are the ones you are actually sweating.
+
+    Clearing the box returns every league rather than none. An empty
+    multiselect reads as "no filter applied", and answering it with a blank
+    page is a worse guess at intent than showing everything.
+    """
+    names = [l.name for l in leagues]
+    picked = st.multiselect(label, names, default=names, key=widget_key)
+    return set(picked or names)
+
+
+def only_leagues(by_team: dict, keep: set) -> dict:
+    """`stake_rows` output narrowed to some leagues, dropping teams left empty."""
+    out = {}
+    for tm, v in by_team.items():
+        rs_ = [h for h in v if h.get("league") in keep]
+        if rs_:
+            out[tm] = rs_
     return out
 
 
@@ -1232,7 +1286,8 @@ if nav == "Home":
     if _live_games:
         st.markdown("")
         st.markdown("#### Playing right now")
-        _stake = stake_rows(wk_all)
+        _keep = league_filter("home_lg")
+        _stake = only_leagues(stake_rows(wk_all), _keep)
         _shown = 0
         for g in _live_games:
             rws_ = _stake.get(g["home"], []) + _stake.get(g["away"], [])
@@ -1250,7 +1305,9 @@ if nav == "Home":
                 f'</div>', unsafe_allow_html=True)
             st.markdown(stake_table(rws_, "home"), unsafe_allow_html=True)
         if not _shown:
-            st.caption("None of your starters are in a game that's live.")
+            st.caption("None of your starters are in a game that's live."
+                       if len(_keep) == len(leagues) else
+                       f"No live starters in {', '.join(sorted(_keep))}.")
         else:
             st.caption("**Green rows are yours, red rows are against you.** A "
                        "green dot means he is on the field right now. "
@@ -1291,9 +1348,11 @@ if nav == "Home":
 if nav == "Sunday":
     from ff import live as live_mod
     st.header("Sunday")
-    c1, c2 = st.columns([1, 4])
+    c1, c2, c3 = st.columns([1, 3, 1])
     wk = int(c1.number_input("Week", 1, 18, _default_week(), key="sun_wk"))
-    if c2.button("Refresh now", key="sun_refresh"):
+    with c2:
+        keep_lg = league_filter("sun_lg")
+    if c3.button("Refresh now", key="sun_refresh"):
         _games.clear(); _holdings.clear()
     st.caption("Your players are pulled from every league that has drafted, so "
                "one game can matter to you several times over. This page does "
@@ -1311,7 +1370,8 @@ if nav == "Sunday":
         st.info("No drafted leagues yet — nothing to follow.")
 
     # "What to put on" is about YOUR afternoon, so it sees only your side.
-    mine_only = {t: [h for h in v if h.get("side") != "opp" and h.get("starter")]
+    mine_only = {t: [h for h in v if h.get("side") != "opp" and h.get("starter")
+                     and h.get("league") in keep_lg]
                  for t, v in hold.items()}
     mine_only = {t: v for t, v in mine_only.items() if v}
     try:
@@ -1329,7 +1389,7 @@ if nav == "Sunday":
     st.markdown(th.css(scope="sun"), unsafe_allow_html=True)
 
     # Same source and same table as Home's "playing right now".
-    starters_by_team = stake_rows(wk)
+    starters_by_team = only_leagues(stake_rows(wk), keep_lg)
 
     def _rows_for(g):
         return (starters_by_team.get(g["home"], [])
@@ -1340,7 +1400,9 @@ if nav == "Sunday":
     # reason to watch.
     slate = [g for g in gs if _rows_for(g)]
     st.subheader(f"Games that matter ({len(slate)})")
-    st.caption("Only games holding a starter of yours or of the team playing "
+    st.caption(("" if len(keep_lg) == len(leagues) else
+                f"Filtered to **{', '.join(sorted(keep_lg))}**. ")
+               + "Only games holding a starter of yours or of the team playing "
                "you. **Green rows are yours, red rows are against you.** A "
                "green dot means he is on the field right now. **Current** is "
                "banked, **Proj now** is where he finishes at his projected rate "
@@ -1651,7 +1713,7 @@ with t_lineup:
                                  f'<td class="ffnum {pcls}">{lp:.1f}</td>')
             trows.append(
                 f'<tr style="{"background:rgba(248,113,113,.07)" if cls else ""}">'
-                f'<td class="ffslot">{a_.get("slot", "")}</td>'
+                f'<td class="ffslot">{pos_rank_label(a_, a_.get("slot"))}</td>'
                 f'<td class="{cls}"><b>{nm_}</b>{dot_if_live(a_.get("team"), KSTATE)}</td>'
                 f'<td class="dim">{a_.get("team") or ""}</td>'
                 f'<td class="dim">{a_.get("opponent", "")}</td>'
@@ -1661,7 +1723,7 @@ with t_lineup:
                   f'<td>{note}</td></tr>')
         st.markdown(
             '<div class="lp"><div class="ffwrap"><table class="fftable">'
-            '<tr><th>Slot</th><th>Player</th><th>Tm</th><th>Opp</th>'
+            '<tr><th>Pos</th><th>Player</th><th>Tm</th><th>Opp</th>'
             + ('<th class="ffnum">Scored</th><th class="ffnum">Proj now</th>'
                if LIVE else '')
             + '<th class="ffnum">Pregame</th><th>Action needed</th></tr>'
@@ -1722,8 +1784,7 @@ with t_lineup:
             add_cell = (f'<td class="ffnum good">+{add:.1f}</td>'
                         if add > 0.05 else '<td class="ffnum dim">—</td>')
             brows.append(
-                f'<tr><td class="ffslot">'
-                f'{q.get("pos_rank", q["position"])}</td>'
+                f'<tr><td class="ffslot">{pos_rank_label(q)}</td>'
                     f'<td><b>{q["name"]}</b>{dot_if_live(q.get("team"), KSTATE)} {pill}</td>'
                 f'<td class="dim">{q.get("team") or ""}</td>'
                 f'<td class="dim">{q.get("opponent", "")}</td>'
@@ -2161,8 +2222,149 @@ with t_waiver:
                 "season value gained by making that swap. These do NOT improve "
                 "this week's starting lineup — nothing on the bench can — they "
                 "improve what you are holding for the weeks when a starter is "
-                "hurt, on bye, or busts. Capped at one spare QB, TE, K and "
-                "D/ST; RB and WR are uncapped.")
+                "hurt, on bye, or busts. Capped at one spare QB and TE; RB and "
+                "WR are uncapped. Kickers and defenses are not ranked by VORP "
+                "at all — they have no replacement level on this board — so "
+                "they get their own sections below.")
+
+        # --- streaming K and D/ST ---------------------------------------
+        # These two sit apart from everything above because they cannot be
+        # measured in the same currency. VORP and "adds to your lineup" both
+        # need a replacement level, and ff.vbd deliberately keeps K and DST off
+        # the board entirely -- so every section above this one is structurally
+        # blind to the two slots you must fill every single week.
+        #
+        # Two columns, because streaming is two different questions and the
+        # answers disagree constantly: NEXT WEEK is a matchup bet, REST OF
+        # SEASON is whether he deserves the roster spot after Sunday. A defense
+        # that is 4th next week and 20th from here is a one-week rental.
+        _last_wk = regular_weeks(L.name)
+        _dst_slots = sum(n for sl, n in (L.starters or {}).items() if sl == "DST")
+        _k_slots = sum(n for sl, n in (L.starters or {}).items() if sl == "K")
+
+        if _dst_slots or _k_slots:
+            # A rostered defense is "Eagles D/ST" / "Jaguars" / "Seattle
+            # Seahawks" depending on the platform, and the feed calls it SEA.
+            # Names will never join these two; team codes always will.
+            _taken_dst = set()
+            for _t in all_t:
+                for _pl in _t.players:
+                    _p = (_pl.get("position") or "").upper()
+                    if _p in ("DST", "DEF", "D/ST"):
+                        _tm = lineup_mod._team_from_blob(blob, _pl["name"], "DST")
+                        if _tm:
+                            _taken_dst.add(_tm.upper())
+            _mine_dst = set()
+            for _t in all_t:
+                if not _t.mine:
+                    continue
+                for _pl in _t.players:
+                    _p = (_pl.get("position") or "").upper()
+                    if _p in ("DST", "DEF", "D/ST"):
+                        _tm = lineup_mod._team_from_blob(blob, _pl["name"], "DST")
+                        if _tm:
+                            _mine_dst.add(_tm.upper())
+
+        if _dst_slots:
+            with st.spinner("pricing defenses…"):
+                _dst = special_mod.dst_stream(L, week, _last_wk)
+            _basis = _dst[0]["basis"] if _dst else "source"
+            _dfree = [e for e in _dst if e["team"] not in _taken_dst]
+            # Your incumbent is the benchmark, because the number that decides
+            # a claim is not what the man on the wire scores -- it is what he
+            # scores MORE than whoever you would bench for him. Best of yours
+            # if you somehow carry two.
+            _held = [e for e in _dst if e["team"] in _mine_dst]
+            _hold_d = max(_held, key=lambda e: e["next"] or 0.0) if _held else None
+            st.subheader(f"Streaming D/ST ({len(_dfree)} available)")
+            if not _dfree:
+                st.info("Every defense in the league is rostered.")
+            else:
+                st.dataframe(pd.DataFrame([{
+                    "D/ST": e["name"],
+                    "Next opp": e["next_opp"] or "—",
+                    f"Proj wk {week}": e["next"],
+                    "vs yours": (None if _hold_d is None or e["next"] is None
+                                 or _hold_d["next"] is None
+                                 else round(e["next"] - _hold_d["next"], 1)),
+                    "Proj rest of season": e["ros"],
+                    "vs yours (ROS)": (None if _hold_d is None
+                                       else round(e["ros"] - _hold_d["ros"], 1)),
+                } for e in _dfree[:15]]), hide_index=True, width="stretch")
+            for _h in _held:
+                _rk = next((i for i, e in enumerate(_dst, 1)
+                            if e["team"] == _h["team"]), None)
+                st.caption(f"**vs yours** is measured against **{_h['name']}** — "
+                           f"{_h['next']} next week (#{_rk} of {len(_dst)}), "
+                           f"{_h['ros']} rest of season.")
+            if not _held:
+                st.caption("You have no defense rostered, so there is nothing "
+                           "to measure against — every row here is a pure gain.")
+            st.caption(
+                ("Scored under **this league's own defensive rules** — events "
+                 "from the projected stat line, points- and yards-allowed "
+                 "priced off the projected totals."
+                 if _basis == "league" else
+                 "⚠ Ordered by **Sleeper's own half-PPR scoring, not this "
+                 "league's** — ESPN publishes its defensive scoring under stat "
+                 "ids this repo has not mapped, and guessing them would "
+                 "mis-score the league silently. Treat as a shortlist.")
+                + " Summed from Sleeper's weekly projections, so a bye shows up "
+                  "as a missing week rather than a quietly optimistic average. "
+                  "**The two columns disagree on purpose:** next week is a "
+                  "matchup bet, rest-of-season is whether he earns the roster "
+                  "spot after Sunday.")
+
+        if _k_slots:
+            with st.spinner("pricing kickers…"):
+                _ks = special_mod.k_stream(L, week, _last_wk)
+            _kbasis = _ks[0]["basis"] if _ks else "unscored"
+            _kfree = [e for e in _ks
+                      if key(e["name"], "K") not in taken]
+            _myk = [e for e in _ks if key(e["name"], "K") in
+                    {key(q["name"], "K") for t in all_t if t.mine
+                     for q in t.players
+                     if (q.get("position") or "").upper() == "K"}]
+            _hold_k = max(_myk, key=lambda e: e["next"] or 0.0) if _myk else None
+            st.subheader(f"Streaming K ({len(_kfree)} available)")
+            if not _kfree:
+                st.info("Every kicker is rostered.")
+            else:
+                st.dataframe(pd.DataFrame([{
+                    "Kicker": e["name"],
+                    "Tm": e["team"] or "",
+                    "Next opp": e["next_opp"] or "—",
+                    f"Proj wk {week}": e["next"],
+                    "vs yours": (None if _hold_k is None or e["next"] is None
+                                 or _hold_k["next"] is None
+                                 else round(e["next"] - _hold_k["next"], 1)),
+                    "Proj rest of season": e["ros"],
+                    "vs yours (ROS)": (None if _hold_k is None
+                                       else round(e["ros"] - _hold_k["ros"], 1)),
+                } for e in _kfree[:15]]), hide_index=True, width="stretch")
+            for _h in _myk:
+                _rk = next((i for i, e in enumerate(_ks, 1)
+                            if e["name"] == _h["name"]), None)
+                st.caption(f"**vs yours** is measured against **{_h['name']}** — "
+                           f"{_h['next']} next week (#{_rk} of {len(_ks)}), "
+                           f"{_h['ros']} rest of season.")
+            if not _myk:
+                st.caption("You have no kicker rostered, so there is nothing to "
+                           "measure against — every row here is a pure gain.")
+            st.caption(
+                {"distance": "Scored under this league's rules — it pays field "
+                             "goals by DISTANCE, and Sleeper's weekly line "
+                             "carries the projected yardage, so this is exact.",
+                 "buckets": "Scored under this league's own made-FG buckets, "
+                            "from Sleeper's weekly line. Where the league "
+                            "lumps 0-39 into one bucket and Sleeper splits it "
+                            "three ways, the three are folded back in — the "
+                            "lump is exactly their sum, so nothing is "
+                            "approximated.",
+                 "unscored": "⚠ This league publishes no kicker scoring, so "
+                             "this is Sleeper's own half-PPR order, not "
+                             "yours."}[_kbasis]
+                + " Byes are counted as zero weeks, not skipped.")
 
         st.subheader("Usage risers — opportunity moves before production")
         # Only players with real usage data -- a "riser" needs a baseline to

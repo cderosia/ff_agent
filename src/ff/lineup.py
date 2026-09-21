@@ -19,7 +19,8 @@ import pandas as pd
 import requests
 
 from .names import key
-from .stats import ESPN_STAT, SLEEPER_STAT, SLOT_ELIGIBILITY, score
+from .stats import (ESPN_STAT, SLEEPER_STAT, SLOT_ELIGIBILITY, fold_fg_buckets,
+                    score)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CACHE = ROOT / "data" / "raw"
@@ -162,11 +163,19 @@ def sleeper_weekly(week: int, max_age_hours: int = 1, force: bool = False) -> di
 
 
 def weekly_points(week: int, scoring: dict) -> dict:
-    """{(name,pos): (points, n_sources, spread)} blended for one week."""
+    """{(name,pos): (points, n_sources, spread)} blended for one week.
+
+    Kicker lines go through `stats.fold_fg_buckets` first. Without it a league
+    whose made-FG bands differ from the feed's scores only the bands that
+    happen to line up, and Sleeper publishes no 50+ band at all -- which had
+    `family` projecting Chris Boswell at 3.3 in a week ESPN's app said 7.8.
+    """
     a, b = espn_weekly(week), sleeper_weekly(week)
     out = {}
     for k in set(a) | set(b):
         lines = [x for x in (a.get(k), b.get(k)) if x]
+        if k[1] == "K":
+            lines = [fold_fg_buckets(line, scoring) for line in lines]
         pts = [score(line, scoring) for line in lines]
         out[k] = (sum(pts) / len(pts), len(pts),
                   (max(pts) - min(pts)) if len(pts) > 1 else 0.0)

@@ -78,11 +78,60 @@ SLEEPER_STAT = {
     "xpm": "xp_made",
     "xpmiss": "xp_missed",
     "fgmiss": "fg_missed",
+    # Totals, carried so the missing-bucket residual below can be computed.
+    # No league scores them, so they contribute nothing to a dot product.
+    "fgm": "fg_made_total",
+    "fga": "fg_att",
     "fgm_0_19": "fg_made_0_19",
     "fgm_20_29": "fg_made_20_29",
     "fgm_30_39": "fg_made_30_39",
     "fgm_40_49": "fg_made_40_49",
     "fgm_50p": "fg_made_50",
+    # keepers and friends split the long end finer than anyone else, and both
+    # keys were unmapped -- so a 55-yarder scored nothing in either league.
+    "fgm_50_59": "fg_made_50_59",
+    "fgm_60p": "fg_made_60",
+    # --- defense / special teams ------------------------------------------
+    # ff.special used to say Sleeper "exposes no K/DST scoring rules through
+    # the API at all". That is not true and cost us a real ranking: every
+    # Sleeper league publishes a full defensive scoring block, and the weekly
+    # DEF projection carries a matching stat line (sack, int, ff, fum_rec,
+    # pts_allow, yds_allow...). The keys were simply never mapped, so a defense
+    # was priced off Sleeper's generic half-PPR total instead of your league's
+    # rules -- where 719 pays 10 for a shutout and -4 for conceding 35.
+    #
+    # Canonical names are the ones YAHOO_STAT already established, so a Sleeper
+    # projection can be scored under a Yahoo league's rules and vice versa.
+    "sack": "def_sack",
+    "int": "def_int",
+    "ff": "def_ff",
+    "fum_rec": "def_fum_rec",
+    "safe": "def_safety",
+    "blk_kick": "def_blk_kick",
+    "def_td": "def_td",
+    "st_td": "def_ret_td",
+    "fum_rec_td": "fum_ret_td",
+    # Deliberately NOT mapped: `def_st_td`, `def_st_ff`, `def_st_fum_rec`,
+    # `def_kr_td`, `def_pr_td`. Each overlaps one of the above and Sleeper's
+    # payload gives no way to tell whether they are additional or the same
+    # event counted again -- a week-4 line carries def_kr_td 0.07, def_pr_td
+    # 0.07 AND st_td 0.07, which is not a sum. Mapping two of them onto one
+    # canonical name would silently double count, so only the unambiguous
+    # total is taken.
+    #
+    # Points/yards-allowed TIERS are also absent on purpose. ff.special scores
+    # them from the RAW `pts_allow` / `yds_allow` numbers through
+    # `tier_value()`, which is the only approach that works across platforms:
+    # Sleeper buckets yards 50 wide (`yds_allow_300_349`) and Yahoo 100 wide
+    # (`ya_300_399`), so the indicator columns do not line up even though the
+    # underlying yardage does.
+    "pts_allow_0": "pa_0",
+    "pts_allow_1_6": "pa_1_6",
+    "pts_allow_7_13": "pa_7_13",
+    "pts_allow_14_20": "pa_14_20",
+    "pts_allow_21_27": "pa_21_27",
+    "pts_allow_28_34": "pa_28_34",
+    "pts_allow_35p": "pa_35",
 }
 
 # ESPN lineup slot id -> slot name
@@ -107,6 +156,68 @@ SLOT_ELIGIBILITY = {
 }
 
 NON_STARTER_SLOTS = {"BENCH", "IR"}
+
+
+# Made-FG buckets, short to long, in the canonical vocabulary.
+FG_BUCKETS = ("fg_made_0_19", "fg_made_20_29", "fg_made_30_39",
+              "fg_made_40_49", "fg_made_50", "fg_made_50_59", "fg_made_60")
+
+# Where a recovered 50+ kick is credited, most preferred first. A league that
+# splits 50-59 from 60+ gets the residual in the SHORTER band: it pays less
+# (5 rather than 6 in both leagues that do this), and a 60-yard field goal is
+# rare enough that assuming one would be the less honest guess.
+_LONG_TARGETS = ("fg_made_50", "fg_made_50_59", "fg_made_60")
+
+
+def fold_fg_buckets(line: dict, scoring: dict) -> dict:
+    """Reconcile a kicker's made-FG buckets with the ones his league scores.
+
+    Two things are wrong with a raw Sleeper kicker line, and together they cost
+    `family` more than half of Chris Boswell: a week-2 projection of 3.3 where
+    ESPN's app said 7.8.
+
+    1. MISSING LONG BUCKET. Sleeper's weekly payload publishes 20-29, 30-39 and
+       40-49 and no 50+ bucket at all -- across week 2, 31% of every made field
+       goal projected league-wide fell into no bucket it publishes. In a league
+       that scores by bucket those kicks were worth nothing. `fgm` carries the
+       real total, so the residual is recovered here.
+
+       ASSUMPTION, not a measurement: the residual is credited to 50+. It is
+       the only bucket Sleeper never publishes, and the one other candidate is
+       ruled out by the data -- `fgm_0_19` appears on 1 of 157 rows, because a
+       sub-20-yard field goal barely exists. What is NOT established is the
+       split's magnitude: ESPN's own season lines imply 55% of made kicks are
+       50+ where this residual implies 31%, and ESPN's figure works out at
+       roughly three times the league's real rate of made 50-yarders, so its
+       bucket stat ids are themselves suspect. Crediting the residual is
+       strictly better than scoring a third of all field goals at zero, and is
+       stated here as the judgement call it is.
+
+    2. BUCKET VOCABULARY. A league does not have to use the same bands as the
+       feed. `family` scores one lumped 0-39 where Sleeper splits it three
+       ways, so all three scored zero. Folding them in is exact -- the lump is
+       precisely their sum -- and it is the larger half of the Boswell gap.
+
+    Returns a new line; the input is not mutated.
+    """
+    out = dict(line)
+    total = out.get("fg_made_total")
+    if total:
+        listed = sum(out.get(b, 0.0) for b in FG_BUCKETS)
+        residual = float(total) - listed
+        if residual > 0.01:
+            tgt = next((b for b in _LONG_TARGETS if b in scoring), "fg_made_50")
+            out[tgt] = out.get(tgt, 0.0) + residual
+
+    # Fold each bucket the league does not score into the widest one it does
+    # that still contains it. Only ever folds SHORTER bands upward into a lump,
+    # never a long kick into a short band.
+    if "fg_made_0_39" in scoring:
+        short = sum(out.pop(b, 0.0) for b in
+                    ("fg_made_0_19", "fg_made_20_29", "fg_made_30_39"))
+        if short:
+            out["fg_made_0_39"] = out.get("fg_made_0_39", 0.0) + short
+    return out
 
 
 def score(stat_line: dict, scoring: dict) -> float:

@@ -26,7 +26,8 @@ DST8 is inside anyone's error bars.
 from __future__ import annotations
 
 import functools
-
+import json
+import pathlib
 import time
 
 import requests
@@ -280,3 +281,194 @@ def live_points(scoring: dict, position: str | None, scored: float,
     if pos == "DST":
         return dst_live(scoring, scored, allowed_now, frac_left, pregame)
     return float(scored) + float(pregame or 0.0) * float(frac_left)
+
+
+# ---------------------------------------------------------------------------
+# Streaming: what to pick up off the wire at K and D/ST
+#
+# The draft-day lists above answer "who do I take in the last two rounds".
+# In season the question is different and has two halves that disagree often
+# enough to be worth showing side by side:
+#
+#   NEXT WEEK      a defense is a matchup bet. The worst defense in the league
+#                  against the worst offense is a better start than a good one
+#                  facing Buffalo, and that is the whole reason streaming works.
+#   REST OF SEASON whether he is worth the roster spot after this week, which
+#                  is the question the next-week number cannot answer.
+#
+# Both are summed from Sleeper's WEEKLY projections and scored under the
+# league's own rules, so a bye week shows up as a missing week rather than as a
+# quietly optimistic average.
+# ---------------------------------------------------------------------------
+_WEEK_CACHE_DIR = pathlib.Path(__file__).resolve().parents[2] / "data" / "raw"
+_WEEK_CACHE_HOURS = 6
+
+
+def _weekly_rows(week: int, pos: str, season: int = SEASON) -> list:
+    """Sleeper's weekly projection for ONE position, cached to disk.
+
+    Position-scoped on purpose. `lineup.sleeper_weekly` pulls every skill
+    position at once, which is the right trade when you need them all, but a
+    rest-of-season sweep asks for fifteen weeks in a row and only wants the 32
+    defenses or the 32 kickers in each. The narrow payload is about a tenth the
+    size and turns a visibly slow page into an instant one.
+    """
+    _WEEK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _WEEK_CACHE_DIR / f"sleeper_{pos.lower()}_{season}_w{week}.json"
+    if path.exists():
+        age = (time.time() - path.stat().st_mtime) / 3600
+        if age < _WEEK_CACHE_HOURS:
+            try:
+                return json.loads(path.read_text())
+            except Exception:
+                pass                      # corrupt cache is not worth dying for
+    try:
+        r = requests.get(SLEEPER_PROJ.format(yr=season, wk=week, pos=pos),
+                         headers=UA, timeout=20)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception:
+        return []                         # a missing week must not kill the sweep
+    path.write_text(json.dumps(rows))
+    return rows
+
+
+# The event half of a defense's score: things that HAPPEN, and once they have
+# happened they are banked. Listed explicitly rather than "everything in the
+# line" so that a new key appearing in Sleeper's payload cannot silently start
+# contributing points -- and so the points/yards-allowed indicator columns,
+# which are handled separately as tiers, cannot be counted twice.
+DST_EVENT_STATS = ("def_sack", "def_int", "def_ff", "def_fum_rec",
+                   "def_safety", "def_blk_kick", "def_td", "def_ret_td",
+                   "fum_ret_td", "ret_td")
+
+
+def dst_score(line: dict, scoring: dict) -> float:
+    """One defense's projected points under one league's rules.
+
+    Events are a plain dot product. The points- and yards-allowed TIERS are
+    priced from the raw projected totals through `tier_value` rather than from
+    the indicator columns in the payload, because the two platforms bucket
+    yardage differently (Sleeper 50 wide, Yahoo 100) and only the underlying
+    number is common to both.
+    """
+    pts = sum(float(line.get(s) or 0.0) * float(scoring.get(s) or 0.0)
+              for s in DST_EVENT_STATS)
+    pts += tier_value(line.get("pts_allow"), PA_TIERS, scoring)
+    pts += tier_value(line.get("yds_allow"), YA_TIERS, scoring)
+    return pts
+
+
+def dst_scoring_basis(scoring: dict) -> str:
+    """"league" where we can price a defense by its own rules, else "source".
+
+    ESPN is the "source" case and it is a gap, not a judgement: ESPN publishes
+    its defensive scoring under stat ids this repo has never mapped, and
+    guessing them would mis-score a league silently. Until they are read off a
+    real payload, an ESPN league's defenses are ordered by Sleeper's own
+    half-PPR number and this says so out loud.
+    """
+    return "league" if any(scoring.get(s) for s in DST_EVENT_STATS) \
+        or has_tiers(scoring) else "source"
+
+
+def dst_stream(league, week: int, last_week: int = 17,
+               season: int = SEASON) -> list[dict]:
+    """Every defense with next week's projection and the rest of the season's."""
+    from .stats import SLEEPER_STAT
+
+    basis = dst_scoring_basis(league.scoring)
+    weeks = [w for w in range(week, last_week + 1)]
+    agg: dict = {}
+    for w in weeks:
+        for x in _weekly_rows(w, "DEF", season):
+            team = (x.get("team") or "").upper()
+            if not team:
+                continue
+            raw = x.get("stats") or {}
+            line = {SLEEPER_STAT[k]: float(v) for k, v in raw.items()
+                    if k in SLEEPER_STAT}
+            # The tier half reads these two straight off the payload; they are
+            # projected totals, not scoring keys, so they never go through
+            # SLEEPER_STAT.
+            for k in ("pts_allow", "yds_allow"):
+                if raw.get(k) is not None:
+                    line[k] = float(raw[k])
+            pts = (dst_score(line, league.scoring) if basis == "league"
+                   else float(raw.get("pts_half_ppr") or raw.get("pts_std") or 0.0))
+            pl = x.get("player") or {}
+            nick = (pl.get("last_name") or pl.get("first_name") or "").strip()
+            e = agg.setdefault(team, {"team": team, "nick": nick, "next": None,
+                                      "next_opp": "", "ros": 0.0, "weeks": 0})
+            if nick and not e["nick"]:
+                e["nick"] = nick
+            if w == week:
+                e["next"] = pts
+                e["next_opp"] = x.get("opponent") or ""
+            e["ros"] += pts
+            e["weeks"] += 1
+    out = sorted(agg.values(), key=lambda e: -(e["next"] or 0.0))
+    for e in out:
+        # Drafts and rosters record a defense as "Seattle Seahawks" or
+        # "Seahawks", never "SEA", so carry the nickname through -- it is the
+        # only token that reliably appears in both this feed and a roster.
+        e["name"] = f"{e['team']} D/ST"
+        e["next"] = round(e["next"], 1) if e["next"] is not None else None
+        e["ros"] = round(e["ros"], 1)
+        e["basis"] = basis
+    return out
+
+
+def k_scoring_basis(scoring: dict) -> str:
+    """Whether a kicker can be priced by this league's rules.
+
+    A distance league is scored exactly -- Sleeper's `fgm_yds` is a real
+    projected total. A bucket league goes through `stats.fold_fg_buckets`,
+    which reconciles the feed's bands with the league's and recovers the 50+
+    kicks Sleeper never publishes; read its docstring before trusting the long
+    end of a bucket league's numbers.
+    """
+    if scoring.get("fg_yds"):
+        return "distance"
+    if any(k.startswith("fg_made") for k in scoring):
+        return "buckets"
+    return "unscored"
+
+
+def k_stream(league, week: int, last_week: int = 17,
+             season: int = SEASON) -> list[dict]:
+    """Every kicker with next week's projection and the rest of the season's."""
+    from .stats import SLEEPER_STAT, fold_fg_buckets, score
+
+    basis = k_scoring_basis(league.scoring)
+    agg: dict = {}
+    for w in range(week, last_week + 1):
+        for x in _weekly_rows(w, "K", season):
+            pl = x.get("player") or {}
+            name = f"{pl.get('first_name','')} {pl.get('last_name','')}".strip()
+            if not name:
+                continue
+            raw = x.get("stats") or {}
+            line = {SLEEPER_STAT[k]: float(v) for k, v in raw.items()
+                    if k in SLEEPER_STAT}
+            # Same reconciliation the lineup uses, so a kicker cannot read one
+            # number on the waiver page and another on the lineup page.
+            line = fold_fg_buckets(line, league.scoring)
+            pts = (score(line, league.scoring) if basis != "unscored"
+                   else float(raw.get("pts_half_ppr") or raw.get("pts_std") or 0.0))
+            e = agg.setdefault(name, {"name": name, "team": x.get("team"),
+                                      "next": None, "next_opp": "",
+                                      "ros": 0.0, "weeks": 0})
+            if x.get("team"):
+                e["team"] = x["team"]
+            if w == week:
+                e["next"] = pts
+                e["next_opp"] = x.get("opponent") or ""
+            e["ros"] += pts
+            e["weeks"] += 1
+    out = sorted(agg.values(), key=lambda e: -(e["next"] or 0.0))
+    for e in out:
+        e["next"] = round(e["next"], 1) if e["next"] is not None else None
+        e["ros"] = round(e["ros"], 1)
+        e["basis"] = basis
+    return out
