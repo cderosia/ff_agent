@@ -37,6 +37,24 @@ class Team:
 # ---------------------------------------------------------------------------
 # Sleeper
 # ---------------------------------------------------------------------------
+# Each platform names the same starting slot differently, and the league
+# LOADERS already fold those into one vocabulary (`leagues.load_sleeper`,
+# `yahoo.SLOT_ALIAS`) -- but the ROSTER readers did not, so `league.starters`
+# said DST while the roster said DEF and `league.starters` said FLEX while
+# Yahoo said W/R/T. Nothing compared the two until empty-slot detection tried
+# to, and an unfilled D/ST in the Yahoo league went unreported all week.
+SLOT_CANON = {
+    "DEF": "DST", "D/ST": "DST",
+    "SUPER_FLEX": "SUPERFLEX", "REC_FLEX": "WR/TE", "WRRB_FLEX": "RB/WR",
+    "W/R/T": "FLEX", "W/R": "FLEX", "Q/W/R/T": "SUPERFLEX",
+}
+
+
+def canon_slot(slot):
+    """One spelling for a starting slot, matching `league.starters`."""
+    return SLOT_CANON.get(slot, slot) if isinstance(slot, str) else slot
+
+
 def _sleeper(league, blob) -> list[Team]:
     lid = league.league_id
     rosters = requests.get(f"{SLEEPER}/league/{lid}/rosters", timeout=30).json()
@@ -63,7 +81,8 @@ def _sleeper(league, blob) -> list[Team]:
         for i, pid in enumerate(r.get("starters") or []):
             if not pid or pid == "0":
                 started.append({"name": None, "position": None,
-                                "slot": slots[i] if i < len(slots) else "?"})
+                                "slot": canon_slot(slots[i])
+                                if i < len(slots) else "?"})
                 continue
             pl = blob.get(str(pid)) or {}
             nm = pl.get("full_name") or " ".join(
@@ -74,7 +93,8 @@ def _sleeper(league, blob) -> list[Team]:
                             # pro team, so kickoff state is resolvable
                             "team": pl.get("team") or (
                                 str(pid).upper() if str(pid).isalpha() else None),
-                            "slot": slots[i] if i < len(slots) else "?"})
+                            "slot": canon_slot(slots[i])
+                            if i < len(slots) else "?"})
         out.append(Team(team_id=str(r.get("roster_id")),
                         name=(u.get("metadata") or {}).get("team_name")
                              or u.get("display_name") or f"team {r.get('roster_id')}",
@@ -129,7 +149,8 @@ def _espn(league, week, blob=None) -> list[Team]:
             slot_id = e.get("lineupSlotId")
             if slot_id is not None and slot_id not in (20, 21):   # bench / IR
                 started.append({"name": nm, "position": pos, "team": team,
-                                "slot": _ESPN_SLOT_NAME.get(slot_id, str(slot_id))})
+                                "slot": canon_slot(
+                                    _ESPN_SLOT_NAME.get(slot_id, str(slot_id)))})
         out.append(Team(team_id=str(t.get("id")),
                         name=t.get("name") or f"team {t.get('id')}",
                         mine=mine, players=players, starters=started))
@@ -192,7 +213,8 @@ def _yahoo(league) -> list[Team]:
                             if isinstance(bit, dict) and "position" in bit:
                                 slot = bit["position"]
                 if slot and slot not in ("BN", "IR", "IL"):
-                    started.append({"name": nm, "position": pos, "slot": slot,
+                    started.append({"name": nm, "position": pos,
+                                    "slot": canon_slot(slot),
                                     "team": rec.get("editorial_team_abbr")})
         out.append(Team(team_id=str(info.get("team_id")),
                         name=info.get("name") or f"team {info.get('team_id')}",
@@ -384,7 +406,9 @@ def standings(league) -> dict:
                     "losses": int(st.get("losses") or 0),
                     "ties": int(st.get("ties") or 0),
                     "pf": float(st.get("fpts") or 0)
-                          + float(st.get("fpts_decimal") or 0) / 100}
+                          + float(st.get("fpts_decimal") or 0) / 100,
+                    # None in a league without divisions.
+                    "division": st.get("division")}
         elif league.platform == "espn":
             ck = {"espn_s2": _env("ESPN_S2"), "SWID": _env("ESPN_SWID")}
             d = requests.get(
@@ -397,7 +421,12 @@ def standings(league) -> dict:
                     "wins": int(rec.get("wins") or 0),
                     "losses": int(rec.get("losses") or 0),
                     "ties": int(rec.get("ties") or 0),
-                    "pf": float(rec.get("pointsFor") or 0)}
+                    "pf": float(rec.get("pointsFor") or 0),
+                    "division": t.get("divisionId"),
+                    # ESPN publishes the live seed, applying its own
+                    # division and head-to-head tiebreak rules -- which we
+                    # cannot reproduce, so prefer it to re-deriving one.
+                    "seed": t.get("playoffSeed")}
         elif league.platform == "yahoo":
             from . import yahoo
             d = yahoo.get(f"/league/{league.raw.get('league_key')}/standings")
@@ -427,3 +456,24 @@ def standings(league) -> dict:
     except Exception:
         return {}
     return out
+
+
+def seeds(table: dict) -> dict:
+    """{team_id: seed} for the table as it stands today.
+
+    The platform's own seed wherever it publishes one (ESPN does, with its
+    head-to-head tiebreaks applied). Otherwise wins then points for, with each
+    division's leader lifted to the top when the league has divisions --
+    matching `winprob.season_odds`, so "seed now" and the odds agree on rules.
+    """
+    if table and all(v.get("seed") for v in table.values()):
+        return {k: int(v["seed"]) for k, v in table.items()}
+    rank = lambda kv: (-kv[1].get("wins", 0), -kv[1].get("pf", 0.0))
+    divs = {v.get("division") for v in table.values()} - {None}
+    leaders = set()
+    if len(divs) > 1:
+        for d in divs:
+            leaders.add(min((kv for kv in table.items()
+                             if kv[1].get("division") == d), key=rank)[0])
+    order = sorted(table.items(), key=lambda kv: (kv[0] not in leaders, rank(kv)))
+    return {k: i for i, (k, _v) in enumerate(order, 1)}

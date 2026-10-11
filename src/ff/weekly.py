@@ -7,6 +7,7 @@ carries -- moves first. So we rank waiver targets on usage trend, not points.
 from __future__ import annotations
 
 import pathlib
+import time
 
 import pandas as pd
 import requests
@@ -30,24 +31,53 @@ NFLVERSE_STAT = {
 }
 
 
-def _download(url: str, dest: pathlib.Path) -> pathlib.Path:
-    if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        r = requests.get(url, timeout=120)
-        r.raise_for_status()
-        dest.write_bytes(r.content)
+# How long an in-progress season's file is trusted before it is re-fetched.
+# nflverse republishes these files as games are played -- through the season,
+# snap counts within a day or so of the game. Download-once kept the 2026
+# files frozen at week 1, so by week 5 every row was "prior", no "recent"
+# column existed, and the waivers page crashed on `snap_pct_recent`. 12h is a
+# guess at "fresh enough", not a measured publish cadence.
+MAX_AGE = 12 * 3600
+
+
+def _download(url: str, dest: pathlib.Path, max_age: float | None = None) -> pathlib.Path:
+    """Cached fetch. `max_age` (seconds) re-fetches a file older than that;
+    None means a finished season, fetched once. A failed re-fetch keeps the
+    stale copy rather than taking the page down."""
+    if dest.exists():
+        if max_age is None or time.time() - dest.stat().st_mtime < max_age:
+            return dest
+        try:
+            r = requests.get(url, timeout=120)
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+        except Exception:
+            pass
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    dest.write_bytes(r.content)
     return dest
+
+
+def _max_age(season: int) -> float | None:
+    """Only the current (or a future) season is still changing."""
+    import datetime as dt
+    today = dt.date.today()
+    current = today.year if today.month >= 3 else today.year - 1
+    return MAX_AGE if season >= current else None
 
 
 def weekly_stats(season: int) -> pd.DataFrame:
     p = _download(f"{NFLVERSE}/stats_player/stats_player_week_{season}.csv",
-                  CACHE / f"nflverse_week_{season}.csv")
+                  CACHE / f"nflverse_week_{season}.csv", _max_age(season))
     return pd.read_csv(p, low_memory=False)
 
 
 def snap_counts(season: int) -> pd.DataFrame:
     p = _download(f"{NFLVERSE}/snap_counts/snap_counts_{season}.csv",
-                  CACHE / f"nflverse_snaps_{season}.csv")
+                  CACHE / f"nflverse_snaps_{season}.csv", _max_age(season))
     return pd.read_csv(p, low_memory=False)
 
 
@@ -79,6 +109,12 @@ def usage_trend(season: int, through_week: int, recent: int = 3) -> pd.DataFrame
                           values=["snap_pct", "targets", "tgt_share", "carries", "games"])
     piv.columns = [f"{a}_{b}" for a, b in piv.columns]
     piv = piv.reset_index().fillna(0.0)
+    # A phase with no rows (or a stat with no values in it) produces no
+    # column at all, and callers read these as attributes. Always emit both.
+    for c in ("snap_pct", "targets", "tgt_share", "carries", "games"):
+        for ph in ("recent", "prior"):
+            if f"{c}_{ph}" not in piv.columns:
+                piv[f"{c}_{ph}"] = 0.0
     piv["snap_delta"] = piv.get("snap_pct_recent", 0) - piv.get("snap_pct_prior", 0)
     piv["tgt_delta"] = piv.get("targets_recent", 0) - piv.get("targets_prior", 0)
     piv["carry_delta"] = piv.get("carries_recent", 0) - piv.get("carries_prior", 0)

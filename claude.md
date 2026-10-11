@@ -35,15 +35,22 @@ from every slot, three seeds, scored as weekly starting-lineup points with byes 
 
 Current standing (weekly starting-lineup points vs. following ADP):
 
-    league            board    caps_adp    vorp
-    719             +113.9       +78.3   -174.5
-    freinds-keeper   +86.1       +24.6   -134.6
-    family          +129.9       +67.8    -39.9
-    friends          +84.8       +23.9   -129.7
-    work            +122.2       +67.1   -129.8
+    league     board    caps_adp    vorp
+    719       +348.4     +107.4   +290.6
+    keepers   +216.6      +31.8   +193.9
+    family    +144.8      +36.6    +60.4
+    friends   +259.4      +74.2   +236.6
+    work      +323.7      +72.8   +209.9
 
-Re-measured 2026-09-06 on that day's projections, so these are not comparable
-to the numbers they replaced -- the feeds moved. `board` beats ADP in all five.
+Re-measured 2026-10-08, the day projections moved onto a rest-of-season basis
+(`ff.ros`). Same day, old basis: board +174 / +133 / +139 / +135 / +221 and
+vorp -8 / -140 / +59 / -145 / +131. `board` beats ADP in all five on both.
+**Do not read the jump as the projections getting better.** In-season the
+feeds know about injuries since the draft and ADP is the preseason market, so
+any strategy that ignores ADP is rewarded for dodging players like Jaxson Dart
+(IR, now projected 0) -- which is why raw `vorp` swung from losing to ADP in
+three leagues to beating it in all five. From week 1 on, this bakeoff measures
+roster construction against stale prices, not draft strategy.
 
 **Run it after any scoring change.** Two things it already taught us: roughly half the
 board's edge is just respecting roster-construction limits, and ranking by raw VORP —
@@ -152,6 +159,11 @@ once by a metric that looked like signal and was regression to the mean
 - **Yahoo needs manual API approval**, not just OAuth. Self-serve apps get
   `invalid_scope` / `additional_authorization_required`.
 - **FFToday 403s intermittently.** A failing projection source is skipped, not fatal.
+- **The season feeds stop agreeing on what "season" means once games are
+  played.** ESPN's season line becomes rest-of-season; Sleeper's and FFToday's
+  stay the preseason full season and are never revised. `ff.ros` puts all three
+  on rest-of-season x 17 / games left before blending. Never average the raw
+  feeds in-season (`fetch(basis="raw")` exists only for comparison).
 
 ## Working agreements
 

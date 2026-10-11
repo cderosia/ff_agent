@@ -11,6 +11,8 @@ it happens here.
 """
 from __future__ import annotations
 
+import functools
+
 import json
 import pathlib
 import time
@@ -36,6 +38,46 @@ RISK_STATUSES = {"Questionable"}
 # ---------------------------------------------------------------------------
 # weekly projections
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# In-process memos.
+#
+# `build_pool` is called ONCE PER TEAM -- the Matchups tab builds it for both
+# sides of every game -- and each call was redoing the same league-invariant
+# work: re-reading and re-parsing two weekly projection files, re-reading the
+# injury payload, and (worst, because `availability` does it per PLAYER) a
+# full schedule scan to decide who is on bye. That is 0.5s a team, so work's
+# 16-team page spent seven seconds rebuilding identical dictionaries.
+#
+# The schedule ones are pure functions of (week, season) and get a plain
+# lru_cache. The file-backed ones get a short TTL so "Refresh data" still
+# means something within a minute, and expose `cache_clear` so the button can
+# force it immediately.
+# ---------------------------------------------------------------------------
+_MEMO_SECONDS = 60
+
+
+def _memo(fn):
+    store: dict = {}
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kw):
+        if kw.get("force"):
+            store.clear()
+            return fn(*args, **kw)
+        k = (args, tuple(sorted(kw.items())))
+        now = time.time()
+        hit = store.get(k)
+        if hit and now - hit[0] < _MEMO_SECONDS:
+            return hit[1]
+        val = fn(*args, **kw)
+        store[k] = (now, val)
+        return val
+
+    wrapper.cache_clear = store.clear
+    return wrapper
+
+
+@_memo
 def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 1,
                 force: bool = False) -> dict:
     """{(name,pos): stat_line} from ESPN's week-specific projection."""
@@ -86,6 +128,7 @@ def espn_weekly(week: int, limit: int = 600, max_age_hours: int = 1,
     return out
 
 
+@_memo
 def espn_injuries(max_age_hours: int = 1) -> dict:
     """{(name,pos): ESPN injuryStatus} -- a second opinion on availability.
 
@@ -114,7 +157,9 @@ def espn_injuries(max_age_hours: int = 1) -> dict:
     return out
 
 
-def sleeper_weekly(week: int, max_age_hours: int = 1, force: bool = False) -> dict:
+@_memo
+def sleeper_weekly(week: int, max_age_hours: int = 1,
+                   force: bool = False) -> dict:
     """{(name,pos): stat_line} from Sleeper/Rotowire's week projection.
 
     Carries KICKERS as well as the skill positions, and deliberately does so
@@ -126,8 +171,9 @@ def sleeper_weekly(week: int, max_age_hours: int = 1, force: bool = False) -> di
     average a right answer with a wrong one. Sleeper's line carries the buckets
     AND `fgm_yds`, so it scores properly under either league's rules.
 
-    Defenses are still absent here -- they have no comparable stat line -- and
-    come from `special.dst_week()` instead.
+    Defenses are still absent here -- this feed carries none -- and come from
+    `special.dst_points()` instead, which scores Sleeper's separate defensive
+    projection under the league's own rules.
     """
     CACHE.mkdir(parents=True, exist_ok=True)
     # Renamed when kickers were added: the old file holds a K-less payload, and
@@ -197,6 +243,7 @@ def schedule(season: int = SEASON) -> pd.DataFrame:
     return d[d.season == season]
 
 
+@functools.lru_cache(maxsize=64)
 def bye_teams(week: int, season: int = SEASON) -> set:
     """Teams NOT playing in a given week."""
     s = schedule(season)
@@ -205,6 +252,7 @@ def bye_teams(week: int, season: int = SEASON) -> set:
     return allteams - playing
 
 
+@functools.lru_cache(maxsize=64)
 def opponents(week: int, season: int = SEASON) -> dict:
     """{team: "@KC" / "vs KC"} for one week. Teams on bye are absent.
 
@@ -266,16 +314,20 @@ def build_pool(league, players, week: int, by_key: dict | None = None,
     which is exactly what the Lineup tab did until this existed.
 
     Defenses have no weekly stat line anywhere and are priced from
-    `special.dst_week`; kickers ride in the weekly blend. Same construction
+    `special.dst_points`, under this league's own rules; kickers ride in the
+    weekly blend. Same construction
     winprob.project_team uses, so a lineup's total and the projection behind its
     win probability agree instead of differing by ~15 points.
     """
     from .names import key as nkey
-    from .special import dst_week
+    from .special import dst_points
 
     by_key = by_key or {}
     wp = weekly_points(week, league.scoring)
-    dsts = dst_week(week)
+    # Scored under THIS league's defensive rules, not Sleeper's generic
+    # half-PPR. See `special.dst_week_scored` -- the two differ by about two
+    # points a defense in the Yahoo league, every week.
+    dsts = dst_points(week, league.scoring)
     opps = opponents(week)
     inj = espn_injuries()
     from .starts import TEAM_ALIASES
@@ -346,13 +398,19 @@ def outdoor_games(week: int, season: int = SEASON) -> dict:
 
 
 _INJURY_INDEX: dict = {}
+_INJURY_BLOB: dict | None = None
 
 
 def injury_index(blob: dict) -> dict:
-    """{(name,pos): (status, body_part)} built once -- the blob is 12k players
-    and a linear scan per lookup is far too slow across five rosters."""
-    global _INJURY_INDEX
-    if _INJURY_INDEX:
+    """{(name,pos): (status, body_part)} -- the blob is 12k players and a
+    linear scan per lookup is far too slow across five rosters.
+
+    Rebuilt whenever it is handed a different blob. It used to be built once
+    per PROCESS, so a refreshed player index (see app.injury_window) never
+    reached it and statuses stayed as they were at startup. The blob itself is
+    held so its id cannot be recycled by a new object."""
+    global _INJURY_INDEX, _INJURY_BLOB
+    if _INJURY_INDEX and blob is _INJURY_BLOB:
         return _INJURY_INDEX
     idx = {}
     for p in blob.values():
@@ -362,7 +420,7 @@ def injury_index(blob: dict) -> dict:
         nm = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
         if nm:
             idx[key(nm, pos)] = (p.get("injury_status"), p.get("injury_body_part"))
-    _INJURY_INDEX = idx
+    _INJURY_INDEX, _INJURY_BLOB = idx, blob
     return idx
 
 
@@ -434,21 +492,39 @@ def close_calls(filled: dict, bench: list[dict], league,
     out.sort(key=lambda x: x["gap"])
     return out
 
-def actual_vs_optimal(pool: list[dict], filled: dict, actual: list[dict]) -> dict:
+def actual_vs_optimal(pool: list[dict], filled: dict, actual: list[dict],
+                      league=None) -> dict:
     """What you have set on the platform, versus what the maths wants.
 
     The app could previously only show its own optimal lineup, which meant it
     could not answer the question you actually have on Sunday morning -- "is the
     lineup I already set wrong, and what do I change" -- and gave no sign when
     a doubtful player was still sitting in a starting slot.
+
+    Pass `league` to have empty slots found by COUNTING, which is the only way
+    that works everywhere. Sleeper and ESPN report an unfilled slot as a row
+    with no player in it, so looking for a name-less row was enough for them.
+    Yahoo simply omits the slot: a week with nobody at D/ST came back as seven
+    starters instead of eight, every one of them named, and the hole was
+    invisible -- no flag on the home page, no row in the matchup table, nothing
+    on the to-do list. Counting what you have against what the league requires
+    catches both shapes.
     """
     from .names import key as nkey
 
     by_name = {nkey(p["name"], p["position"]): p for p in pool}
     started, missing = [], []
+    if league is not None:
+        have: dict = {}
+        for a in actual:
+            if a.get("name") and a.get("slot"):
+                have[a["slot"]] = have.get(a["slot"], 0) + 1
+        for slot, need in (league.starters or {}).items():
+            missing.extend([slot] * max(0, need - have.get(slot, 0)))
     for a in actual:
         if not a.get("name"):
-            missing.append(a.get("slot"))
+            if league is None:              # already counted above
+                missing.append(a.get("slot"))
             continue
         pos = a.get("position") or ""
         pos = "DST" if pos in ("DEF", "D/ST") else pos

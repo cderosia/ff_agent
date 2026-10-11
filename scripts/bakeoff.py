@@ -131,8 +131,12 @@ def main():
         leagues = [l for l in leagues if l.name in wanted]
     byes = starts_mod.bye_by_team()
 
+    # Fetched ONCE: projections are league-independent (each league scores
+    # them in board.build). This used to be fetch(L), which passed the league
+    # as `force` -- always truthy -- so every league re-downloaded every feed.
+    projections = fetch()
     for L in leagues:
-        rows, _ = board_mod.build(fetch(L), L)
+        rows, _ = board_mod.build(projections, L)
         print(f"\n=== {L.name}  ({L.teams} teams, "
               f"{L.starter_slots + L.bench} rounds)")
         print(f"    weekly starting-lineup points, "

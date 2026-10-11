@@ -187,6 +187,10 @@ def load_yahoo(cfg: dict) -> League:
     worse than a loud failure.
     """
     from . import yahoo
+    if cfg.get("eliminated") and (cfg.get("manual") or {}).get("scoring"):
+        # Out of the league: nothing live is worth a request, and the cookie
+        # behind it expires every couple of weeks.
+        return load_manual(cfg)
     key = cfg.get("league_key") or f"nfl.l.{cfg['league_id']}"
     try:
         s = yahoo.league_settings(key)

@@ -223,14 +223,26 @@ def _team_rows(L, team, week, blob, extra) -> dict:
         except Exception:
             starters = set()
 
+    # One spelling per defense. Each platform names them its own way -- ESPN
+    # "Ravens D/ST", Sleeper/Yahoo "Baltimore Ravens" -- and the cross-league
+    # table groups rows by this name, so the same defense split into two
+    # groups. `key` below keeps the platform's own spelling, because that is
+    # what its live scores are filed under.
+    nick = {_norm(d.get("team")): d.get("last_name")
+            for d in (blob or {}).values()
+            if d.get("position") == "DEF" and d.get("team") and d.get("last_name")}
+
     out = {}
     for p in pool:
         nfl = _norm(p.get("team"))
         if not nfl:
             continue
         k = nkey(p["name"], p.get("position"))
+        shown = p["name"]
+        if _pos(p) == "DST":
+            shown = f"{nick.get(nfl) or nfl} D/ST"
         out.setdefault(nfl, []).append({
-            "player": p["name"], "position": p.get("position"),
+            "player": shown, "position": p.get("position"),
             "league": L.name,
             "starter": k in starters,
             "proj": round(p.get("week_points") or 0, 1),

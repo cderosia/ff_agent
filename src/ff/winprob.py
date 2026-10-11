@@ -117,8 +117,8 @@ def project_team(team, week_pts: dict, league, week: int | None = None
     from .lineup import optimize
     from .names import key as nkey
 
-    from .special import dst_week
-    dsts = dst_week(week) if week else {}
+    from .special import dst_points
+    dsts = dst_points(week, league.scoring) if week else {}
 
     # Prefer the lineup the manager ACTUALLY set. Optimising everyone's roster
     # silently credits every rival with a perfect lineup, which inflates their
@@ -161,7 +161,8 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
                 sims: int = 4000, seed: int = 2026,
                 records: list[dict] | None = None,
                 weeks_left: int | None = None,
-                eliminated: list[bool] | None = None) -> dict:
+                eliminated: list[bool] | None = None,
+                divisions: list | None = None) -> dict:
     """Playoff / survival odds over a whole season.
 
     DIFFERENT QUESTION TO `league_odds`, AND THE NUMBERS WILL NOT MATCH.
@@ -246,15 +247,45 @@ def season_odds(team_totals: list[tuple[float, float]], me: int,
         np.add.at(wins, (np.arange(sims)[:, None], a), (sa > sb).astype(float))
         np.add.at(wins, (np.arange(sims)[:, None], b), (sb > sa).astype(float))
     season = W.sum(axis=1) + banked_pf
-    order = np.lexsort((-season, -wins), axis=1)
+    # Wins, then points for. Points are well under 1e6, so one key orders both.
+    key = wins * 1e6 + season
+    # Divisions: each division's winner is guaranteed a spot AND the top seeds,
+    # which is how family (ESPN) seeds -- its live table puts a 3-1 division
+    # leader above a 3-1 team with more points -- and how Carter says friends
+    # (Sleeper) does. Ignoring it made a weak division's leader look like a
+    # bubble team. Ties are still broken on points for: ESPN's rule is head-
+    # to-head, which random pairings cannot reproduce.
+    divs = [d for d in (divisions or []) if d is not None]
+    div_won = np.zeros(n)
+    if len(set(divs)) > 1:
+        bonus = np.zeros_like(key)
+        for d in set(divs):
+            cols = np.array([i for i, x in enumerate(divisions) if x == d])
+            win = cols[key[:, cols].argmax(axis=1)]
+            bonus[np.arange(sims), win] = 1e12
+            np.add.at(div_won, win, 1.0)
+        key = key + bonus
+    order = np.argsort(-key, axis=1, kind="stable")
     rank = np.empty_like(order)
     np.put_along_axis(rank, order, np.arange(1, n + 1)[None, :].repeat(sims, 0), axis=1)
+    # Every team's odds come out of the same draws, so they are mutually
+    # consistent: playoff odds sum to `playoff_teams` across the league.
+    p_all = (rank <= playoff_teams).mean(axis=0)
+    teams = [{"playoff": float(p_all[i]),
+              "first": float((rank[:, i] == 1).mean()),
+              "mean_wins": float(wins[:, i].mean()),
+              "mean_rank": float(rank[:, i].mean()),
+              # Share of seasons this team won its division; 0 with no divisions.
+              "div_win": float(div_won[i] / sims)} for i in range(n)]
     return {"mode": "head_to_head",
-            "playoff": float((rank[:, me] <= playoff_teams).mean()),
+            "playoff": float(p_all[me]),
             "first": float((rank[:, me] == 1).mean()),
             "last": float((rank[:, me] == n).mean()),
             "mean_wins": float(wins[:, me].mean()),
-            "mean_rank": float(rank[:, me].mean())}
+            "mean_rank": float(rank[:, me].mean()),
+            # 1 = best playoff odds in the league. Ties share the better rank.
+            "playoff_rank": int((p_all > p_all[me]).sum()) + 1,
+            "teams": teams}
 
 
 
@@ -285,9 +316,9 @@ def live_project_team(team, week_pts: dict, league, live_row: dict | None,
     from .lineup import optimize
     from .livescore import remaining, pick
     from .names import key as nkey
-    from .special import dst_week, live_points
+    from .special import dst_points, live_points
 
-    dsts = dst_week(week) if week else {}
+    dsts = dst_points(week, league.scoring) if week else {}
     scored = (live_row or {}).get("starters") or {}
 
     actual = [p for p in (team.starters or []) if p.get("name")]
@@ -364,7 +395,8 @@ def league_odds(teams, week_pts: dict, league, opponent=None,
         else:
             mu, sd, starters = project_team(t, week_pts, league, week=week)
         dists.append((mu, sd))
-        detail.append({"team": t.name, "mine": t.mine, "proj": round(mu, 1),
+        detail.append({"team": t.name, "team_id": t.team_id,
+                       "mine": t.mine, "proj": round(mu, 1),
                        "sd": round(sd, 1), "n_starters": len(starters),
                        "scored": round(sum(p.get("scored", 0)
                                            for p in starters), 1)

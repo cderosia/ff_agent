@@ -178,6 +178,54 @@ def dst_week(week: int, season: int = SEASON) -> dict:
     return out
 
 
+@_ttl_cache
+def dst_week_scored(week: int, scoring_key: tuple, season: int = SEASON) -> dict:
+    """{team: projected points} for one week, under THIS LEAGUE's rules.
+
+    `dst_week` above returns Sleeper's own half-PPR number and must keep doing
+    so: `projlog` stores it as `points_ref`, a reference figure that has to
+    mean the same thing in every snapshot ever taken, and rescoring it per
+    league would make the archive incomparable to itself.
+
+    Everything that prices a defense FOR A LEAGUE should use this instead.
+    Yahoo pays 0.75 a sack where Sleeper pays 1.0, 1.5 an interception where
+    Sleeper pays 2.0, and -3 for conceding 35 where Sleeper's generic number
+    has no negative at all -- so the `work` league's defenses were running
+    about two points high apiece, and its worst ones by more than three.
+
+    Falls back to the generic number where a league publishes no defensive
+    rules at all (ESPN, whose stat ids this repo has not mapped), which
+    `dst_scoring_basis` reports as "source".
+    """
+    from .stats import SLEEPER_STAT
+
+    scoring = dict(scoring_key)
+    use_league = dst_scoring_basis(scoring) == "league"
+    out = {}
+    for x in _weekly_rows(week, "DEF", season):
+        team = (x.get("team") or "").upper()
+        if not team:
+            continue
+        raw = x.get("stats") or {}
+        if not use_league:
+            pts = raw.get("pts_half_ppr", raw.get("pts_std"))
+            if pts is not None:
+                out[team] = float(pts)
+            continue
+        line = {SLEEPER_STAT[k]: float(v) for k, v in raw.items()
+                if k in SLEEPER_STAT}
+        for k in ("pts_allow", "yds_allow"):
+            if raw.get(k) is not None:
+                line[k] = float(raw[k])
+        out[team] = dst_score(line, scoring)
+    return out
+
+
+def dst_points(week: int, scoring: dict, season: int = SEASON) -> dict:
+    """`dst_week_scored` with a dict argument, hashed for the cache."""
+    return dst_week_scored(week, tuple(sorted(scoring.items())), season)
+
+
 # Points-allowed and yards-allowed tiers, as (lower, upper, canonical key).
 # Upper bound None means open-ended.
 PA_TIERS = [(0, 0, "pa_0"), (1, 6, "pa_1_6"), (7, 13, "pa_7_13"),
@@ -188,10 +236,32 @@ YA_TIERS = [(0, 99, "ya_0_99"), (100, 199, "ya_100_199"),
             (400, 499, "ya_400_499"), (500, None, "ya_500")]
 
 # League-average offensive output, used to extrapolate what a defense will have
-# allowed by the final whistle. Rough figures, and stated as assumptions rather
-# than measurements: ~22 points and ~340 yards per team per game.
-AVG_PPG = 22.0
-AVG_YPG = 340.0
+# allowed by the final whistle. These were carried as admitted guesses; they
+# are now MEASURED, over 604 defense-games of 2025 and 2026 play-by-play:
+# 23.1 points and 328 yards allowed per team per game. Swapping the guesses
+# for the measurements moves tier accuracy by 0.6%, which is noise -- the
+# guesses were good. Recorded because a measured number and a lucky one look
+# identical until someone checks.
+AVG_PPG = 23.1
+AVG_YPG = 328.0
+
+# TESTED AND REJECTED: extrapolating at the pace the GAME is actually going,
+# rather than at league average. It is the intuitive fix -- a defense being
+# run over is not having a league-average day, and it would have moved a
+# Bengals projection from +1.6 toward the -5.5 Yahoo was showing -- and it is
+# decisively worse. Scored against known finals over the same 604
+# defense-games, mean absolute error in TIER POINTS:
+#
+#     football left      observed pace    league average (this)
+#     75%                        5.64                     2.27
+#     50%                        2.52                     1.91
+#     25%                        1.72                     1.50
+#
+# Observed pace is also badly biased early (+3.48 tier points with 75% left):
+# one early touchdown extrapolates to a blowout. Shrinking the observed rate
+# toward the league mean with a pseudo-count helps, and converges on league
+# average as the count rises -- at no setting did it beat just using the mean
+# by more than noise. Do not rebuild this.
 
 
 def tier_value(amount: float | None, tiers, scoring: dict) -> float:

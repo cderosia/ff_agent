@@ -45,7 +45,9 @@ ESPN_TEAM = {
 def fetch_espn(limit: int = 600, max_age_hours: int = 12, force: bool = False) -> list[dict]:
     """Player projections, cached to disk so drafting doesn't hammer ESPN."""
     CACHE.mkdir(parents=True, exist_ok=True)
-    cached = CACHE / f"espn_proj_{SEASON}.json"
+    # Renamed when weekly lines were added (see ff.ros): an old cache has no
+    # `weekly` and would silently lose ESPN's availability signal.
+    cached = CACHE / f"espn_proj_{SEASON}_wk.json"
 
     if cached.exists() and not force:
         age = (time.time() - cached.stat().st_mtime) / 3600
@@ -85,6 +87,21 @@ def fetch_espn(limit: int = 600, max_age_hours: int = 12, force: bool = False) -
                 line[name] = float(val)
         if not line:
             continue
+        # Every week's projected line, for rest-of-season (ff.ros). ESPN can
+        # publish an empty stub beside a real row for one week; richest wins.
+        weekly: dict = {}
+        for s in p.get("stats", []):
+            if (s.get("seasonId") != SEASON or s.get("statSourceId") != 1
+                    or s.get("statSplitTypeId") != 1):
+                continue
+            wl = {}
+            for sid, val in (s.get("stats") or {}).items():
+                name = ESPN_STAT.get(int(sid))
+                if name and val:
+                    wl[name] = float(val)
+            w = str(s.get("scoringPeriodId"))
+            if len(wl) >= len(weekly.get(w) or {}):
+                weekly[w] = wl
         own = p.get("ownership") or {}
         out.append({
             "espn_id": p.get("id"),
@@ -98,6 +115,7 @@ def fetch_espn(limit: int = 600, max_age_hours: int = 12, force: bool = False) -
             "auction_value": own.get("auctionValueAverage") or 0.0,
             "pct_owned": round(own.get("percentOwned") or 0.0, 1),
             "stats": line,
+            "weekly": weekly,
         })
 
     cached.write_text(json.dumps(out))
@@ -264,11 +282,17 @@ FETCHERS = {"espn": fetch_espn, "sleeper": fetch_sleeper, "fftoday": fetch_fftod
 
 
 def fetch(force: bool = False,
-          sources: tuple = ("espn", "sleeper", "fftoday")) -> list[dict]:
+          sources: tuple = ("espn", "sleeper", "fftoday"),
+          basis: str = "pace", week: int | None = None) -> list[dict]:
     """Blended projections. Averages each stat across whichever sources have it.
 
     A source that is unreachable is skipped rather than fatal -- a scraped source
     WILL break eventually, and a draft board from two sources beats no board.
+
+    `basis="pace"` (the default) puts every source on rest-of-season as a
+    17-game pace first -- see ff.ros for why the raw feeds cannot be averaged
+    once games are played. `basis="raw"` is the old blend of the feeds as
+    published, kept for comparison.
     """
     sources = tuple(sources)[:MAX_SOURCES]
 
@@ -302,19 +326,29 @@ def fetch(force: bool = False,
                           "auction_value", "pct_owned"):
                     if p.get(f):
                         rec[f] = p[f]
+                if p.get("weekly") is not None:
+                    rec["espn_weekly"] = p["weekly"]
             elif src == "sleeper":
                 rec["sleeper_adp"] = p.get("adp")
                 if p.get("games"):
                     rec["games"] = p["games"]
 
+    if basis == "pace":
+        from . import ros
+        ros.to_pace(merged, week)
+
     out = []
     for k, rec in merged.items():
+        rec.pop("espn_weekly", None)
         lines = rec.pop("lines")
         stats: dict = {}
         for line in lines.values():
             for stat, val in line.items():
                 stats.setdefault(stat, []).append(val)
         rec["stats"] = {s: sum(v) / len(v) for s, v in stats.items()}
+        if basis == "pace":
+            # Same per-stat mean, then onto the 17-game scale (ff.ros).
+            rec["stats"] = rec.pop("pace_stats")
         rec["sources"] = sorted(lines)
         rec["n_sources"] = len(lines)
         # per-source spread on the headline stat, as an uncertainty flag
